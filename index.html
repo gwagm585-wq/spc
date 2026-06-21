@@ -1,0 +1,5175 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>공정 관리 대시보드 — 공정능력분석 · 통계적공정관리</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&family=Noto+Serif+KR:wght@600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #f6f5f1; }
+  #root { min-height: 100vh; }
+  #loading-fallback {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #f6f5f1; color: #928f84; font-family: 'Noto Sans KR', sans-serif; font-size: 14px;
+    flex-direction: column; gap: 12px;
+  }
+  .spinner {
+    width: 26px; height: 26px; border: 2px solid #dddad1; border-top-color: #33406f;
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="root">
+  <div id="loading-fallback">
+    <div class="spinner"></div>
+    <div>대시보드를 불러오는 중...</div>
+  </div>
+</div>
+
+<script>
+const {
+  useState,
+  useMemo,
+  useCallback,
+  useRef,
+  useEffect
+} = React;
+
+// ============================================================
+// statsEngine.js
+// 공정능력분석(Process Capability) + 통계적공정관리(SPC) 핵심 통계 엔진
+// 강의록(스마트제조_08_공정능력분석, 스마트제조_09_통계적공정관리) 기반 구현
+// ============================================================
+
+// ---------- 불편화 상수 테이블 (N=2~25), 강의록 p.7, p.15 (08), p.5 (09) ----------
+// c4, d2, d3, d4: 08 강의록 표 (N=1~25)
+const C4_TABLE = {
+  1: null,
+  2: 0.797885,
+  3: 0.886227,
+  4: 0.921318,
+  5: 0.939986,
+  6: 0.951533,
+  7: 0.959369,
+  8: 0.965030,
+  9: 0.969311,
+  10: 0.972659,
+  11: 0.975350,
+  12: 0.977559,
+  13: 0.979406,
+  14: 0.980971,
+  15: 0.982316,
+  16: 0.983484,
+  17: 0.984506,
+  18: 0.985410,
+  19: 0.986214,
+  20: 0.986934,
+  21: 0.987583,
+  22: 0.988170,
+  23: 0.988705,
+  24: 0.989193,
+  25: 0.989640
+};
+const D2_TABLE = {
+  1: 1,
+  2: 1.128,
+  3: 1.693,
+  4: 2.059,
+  5: 2.326,
+  6: 2.534,
+  7: 2.704,
+  8: 2.847,
+  9: 2.970,
+  10: 3.078,
+  11: 3.173,
+  12: 3.258,
+  13: 3.336,
+  14: 3.407,
+  15: 3.472,
+  16: 3.532,
+  17: 3.588,
+  18: 3.640,
+  19: 3.689,
+  20: 3.735,
+  21: 3.778,
+  22: 3.819,
+  23: 3.858,
+  24: 3.895,
+  25: 3.931
+};
+const D3_TABLE = {
+  1: 0.82,
+  2: 0.8525,
+  3: 0.8884,
+  4: 0.8798,
+  5: 0.8641,
+  6: 0.8480,
+  7: 0.8332,
+  8: 0.8198,
+  9: 0.8078,
+  10: 0.7971,
+  11: 0.7873,
+  12: 0.7785,
+  13: 0.7704,
+  14: 0.763,
+  15: 0.7562,
+  16: 0.7499,
+  17: 0.7441,
+  18: 0.7386,
+  19: 0.7335,
+  20: 0.7287,
+  21: 0.7242,
+  22: 0.7199,
+  23: 0.7159,
+  24: 0.7121,
+  25: 0.7084
+};
+const D4_TABLE = {
+  1: 1,
+  2: 0.954,
+  3: 1.588,
+  4: 1.978,
+  5: 2.257,
+  6: 2.472,
+  7: 2.645,
+  8: 2.791,
+  9: 2.915,
+  10: 3.024,
+  11: 3.121,
+  12: 3.207,
+  13: 3.285,
+  14: 3.356,
+  15: 3.422,
+  16: 3.482,
+  17: 3.538,
+  18: 3.591,
+  19: 3.640,
+  20: 3.686,
+  21: 3.730,
+  22: 3.771,
+  23: 3.811,
+  24: 3.847,
+  25: 3.883
+};
+
+// A2, A3, d2, D3, D4, B3, B4 : 09 강의록 표 (Sample Size m = 2~25)
+const CTRL_TABLE = {
+  2: {
+    A2: 1.880,
+    A3: 2.659,
+    d2: 1.128,
+    D3: 0,
+    D4: 3.267,
+    B3: 0,
+    B4: 3.267
+  },
+  3: {
+    A2: 1.023,
+    A3: 1.954,
+    d2: 1.693,
+    D3: 0,
+    D4: 2.574,
+    B3: 0,
+    B4: 2.568
+  },
+  4: {
+    A2: 0.729,
+    A3: 1.628,
+    d2: 2.059,
+    D3: 0,
+    D4: 2.282,
+    B3: 0,
+    B4: 2.266
+  },
+  5: {
+    A2: 0.577,
+    A3: 1.427,
+    d2: 2.326,
+    D3: 0,
+    D4: 2.114,
+    B3: 0,
+    B4: 2.089
+  },
+  6: {
+    A2: 0.483,
+    A3: 1.287,
+    d2: 2.534,
+    D3: 0,
+    D4: 2.004,
+    B3: 0.030,
+    B4: 1.970
+  },
+  7: {
+    A2: 0.419,
+    A3: 1.182,
+    d2: 2.704,
+    D3: 0.076,
+    D4: 1.924,
+    B3: 0.118,
+    B4: 1.882
+  },
+  8: {
+    A2: 0.373,
+    A3: 1.099,
+    d2: 2.847,
+    D3: 0.136,
+    D4: 1.864,
+    B3: 0.185,
+    B4: 1.815
+  },
+  9: {
+    A2: 0.337,
+    A3: 1.032,
+    d2: 2.970,
+    D3: 0.184,
+    D4: 1.816,
+    B3: 0.239,
+    B4: 1.761
+  },
+  10: {
+    A2: 0.308,
+    A3: 0.975,
+    d2: 3.078,
+    D3: 0.223,
+    D4: 1.777,
+    B3: 0.284,
+    B4: 1.716
+  },
+  11: {
+    A2: 0.285,
+    A3: 0.927,
+    d2: 3.173,
+    D3: 0.256,
+    D4: 1.744,
+    B3: 0.321,
+    B4: 1.679
+  },
+  12: {
+    A2: 0.266,
+    A3: 0.886,
+    d2: 3.258,
+    D3: 0.283,
+    D4: 1.717,
+    B3: 0.354,
+    B4: 1.646
+  },
+  13: {
+    A2: 0.249,
+    A3: 0.850,
+    d2: 3.336,
+    D3: 0.307,
+    D4: 1.693,
+    B3: 0.382,
+    B4: 1.618
+  },
+  14: {
+    A2: 0.235,
+    A3: 0.817,
+    d2: 3.407,
+    D3: 0.328,
+    D4: 1.672,
+    B3: 0.406,
+    B4: 1.594
+  },
+  15: {
+    A2: 0.223,
+    A3: 0.789,
+    d2: 3.472,
+    D3: 0.347,
+    D4: 1.653,
+    B3: 0.428,
+    B4: 1.572
+  },
+  16: {
+    A2: 0.212,
+    A3: 0.763,
+    d2: 3.532,
+    D3: 0.363,
+    D4: 1.637,
+    B3: 0.448,
+    B4: 1.552
+  },
+  17: {
+    A2: 0.203,
+    A3: 0.739,
+    d2: 3.588,
+    D3: 0.378,
+    D4: 1.622,
+    B3: 0.466,
+    B4: 1.534
+  },
+  18: {
+    A2: 0.194,
+    A3: 0.718,
+    d2: 3.640,
+    D3: 0.391,
+    D4: 1.608,
+    B3: 0.482,
+    B4: 1.518
+  },
+  19: {
+    A2: 0.187,
+    A3: 0.698,
+    d2: 3.689,
+    D3: 0.403,
+    D4: 1.597,
+    B3: 0.497,
+    B4: 1.503
+  },
+  20: {
+    A2: 0.180,
+    A3: 0.680,
+    d2: 3.735,
+    D3: 0.415,
+    D4: 1.585,
+    B3: 0.510,
+    B4: 1.490
+  },
+  21: {
+    A2: 0.173,
+    A3: 0.663,
+    d2: 3.778,
+    D3: 0.425,
+    D4: 1.575,
+    B3: 0.523,
+    B4: 1.477
+  },
+  22: {
+    A2: 0.167,
+    A3: 0.647,
+    d2: 3.819,
+    D3: 0.434,
+    D4: 1.566,
+    B3: 0.534,
+    B4: 1.466
+  },
+  23: {
+    A2: 0.162,
+    A3: 0.633,
+    d2: 3.858,
+    D3: 0.443,
+    D4: 1.557,
+    B3: 0.545,
+    B4: 1.455
+  },
+  24: {
+    A2: 0.157,
+    A3: 0.619,
+    d2: 3.895,
+    D3: 0.451,
+    D4: 1.548,
+    B3: 0.555,
+    B4: 1.445
+  },
+  25: {
+    A2: 0.153,
+    A3: 0.606,
+    d2: 3.931,
+    D3: 0.459,
+    D4: 1.541,
+    B3: 0.565,
+    B4: 1.435
+  }
+};
+
+// 근사식 (강의록 08, p.15~16) : n>25(또는 51)인 경우 사용
+function gammaFn(x) {
+  // Lanczos approximation for Gamma function
+  const g = 7;
+  const p = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+  if (x < 0.5) {
+    return Math.PI / (Math.sin(Math.PI * x) * gammaFn(1 - x));
+  }
+  x -= 1;
+  let a = p[0];
+  const t = x + g + 0.5;
+  for (let i = 1; i < g + 2; i++) a += p[i] / (x + i);
+  return Math.sqrt(2 * Math.PI) * Math.pow(t, x + 0.5) * Math.exp(-t) * a;
+}
+function c4Exact(n) {
+  if (n <= 1) return null;
+  return Math.sqrt(2 / (n - 1)) * (gammaFn(n / 2) / gammaFn((n - 1) / 2));
+}
+function c2Exact(n) {
+  if (n <= 1) return null;
+  return Math.sqrt(2 / n) * (gammaFn(n / 2) / gammaFn((n - 1) / 2));
+}
+
+// 불편화 상수 통합 조회 함수 (테이블 우선, 범위 밖이면 근사식/근사값)
+function unbiasedConst(name, n) {
+  n = Math.round(n);
+  if (n < 2) n = 2;
+  if (name === 'c4') {
+    if (n <= 25 && C4_TABLE[n] != null) return C4_TABLE[n];
+    return c4Exact(n);
+  }
+  if (name === 'c2') {
+    if (n <= 25 && C4_TABLE[n] != null) {
+      // c2 근사: 강의록 식 사용 (정확식)
+      return c2Exact(n);
+    }
+    return c2Exact(n);
+  }
+  if (name === 'd2') {
+    if (n <= 25 && D2_TABLE[n] != null) return D2_TABLE[n];
+    return 3.4873 + 0.0250141 * n - 0.00009823 * n * n;
+  }
+  if (name === 'd3') {
+    if (n <= 25 && D3_TABLE[n] != null) return D3_TABLE[n];
+    return 0.80818 - 0.051871 * n + 0.00005098 * n * n - 0.00000019 * n * n * n;
+  }
+  if (name === 'd4') {
+    if (n <= 25 && D4_TABLE[n] != null) return D4_TABLE[n];
+    return 2.88606 + 0.051313 * n - 0.00049243 * n * n + 0.00000188 * n * n * n;
+  }
+  // 관리도용 (A2,A3,D3,D4,B3,B4): 테이블 범위(2~25) 밖이면 마지막 값 사용
+  if (['A2', 'A3', 'D3', 'D4', 'B3', 'B4'].includes(name)) {
+    const key = Math.min(Math.max(n, 2), 25);
+    return CTRL_TABLE[key][name];
+  }
+  return null;
+}
+function ctrlConst(n) {
+  const key = Math.min(Math.max(Math.round(n), 2), 25);
+  return CTRL_TABLE[key];
+}
+
+// ---------- 기초 통계 함수 ----------
+function mean(arr) {
+  if (!arr || arr.length === 0) return NaN;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+function stdSample(arr) {
+  // ddof=1 (표본표준편차)
+  if (!arr || arr.length < 2) return NaN;
+  const m = mean(arr);
+  const sumSq = arr.reduce((a, b) => a + (b - m) ** 2, 0);
+  return Math.sqrt(sumSq / (arr.length - 1));
+}
+function range(arr) {
+  if (!arr || arr.length === 0) return NaN;
+  return Math.max(...arr) - Math.min(...arr);
+}
+
+// 정규분포 PDF / CDF (근사)
+function normPdf(x, mu, sigma) {
+  if (sigma <= 0) return 0;
+  const z = (x - mu) / sigma;
+  return Math.exp(-0.5 * z * z) / (sigma * Math.sqrt(2 * Math.PI));
+}
+// erf 근사 (Abramowitz-Stegun)
+function erf(x) {
+  const sign = x < 0 ? -1 : 1;
+  x = Math.abs(x);
+  const a1 = 0.254829592,
+    a2 = -0.284496736,
+    a3 = 1.421413741,
+    a4 = -1.453152027,
+    a5 = 1.061405429,
+    p = 0.3275911;
+  const t = 1 / (1 + p * x);
+  const y = 1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+function normCdf(x, mu = 0, sigma = 1) {
+  return 0.5 * (1 + erf((x - mu) / (sigma * Math.sqrt(2))));
+}
+// 표준정규 분위수(역함수) 근사 (Acklam's algorithm)
+function normInv(p) {
+  if (p <= 0) return -Infinity;
+  if (p >= 1) return Infinity;
+  const a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
+  const b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01];
+  const c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
+  const d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00];
+  const plow = 0.02425;
+  let q, r;
+  if (p < plow) {
+    q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  } else if (p > 1 - plow) {
+    q = Math.sqrt(-2 * Math.log(1 - p));
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  } else {
+    q = p - 0.5;
+    r = q * q;
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+  }
+}
+
+// ---------- Shapiro-Wilk 근사 검정 ----------
+// 간이 구현: 표본이 작을 때도 동작하는 근사적 Shapiro-Wilk (Royston 근사)
+function shapiroWilk(data) {
+  const x = [...data].sort((a, b) => a - b);
+  const n = x.length;
+  if (n < 3) return {
+    stat: null,
+    p: null
+  };
+  const m = x.map((_, i) => normInv((i + 1 - 0.375) / (n + 0.25)));
+  const mSqSum = m.reduce((a, v) => a + v * v, 0);
+  const c = m.map(v => v / Math.sqrt(mSqSum));
+  const xMean = mean(x);
+  let num = 0;
+  for (let i = 0; i < n; i++) num += c[i] * x[i];
+  num = num * num;
+  let den = 0;
+  for (let i = 0; i < n; i++) den += (x[i] - xMean) ** 2;
+  const W = den > 0 ? num / den : 1;
+
+  // Royston(1992) p-value 근사
+  let pValue;
+  try {
+    const lnN = Math.log(n);
+    let mu, sigma;
+    if (n <= 11) {
+      const gamma = -2.273 + 0.459 * n;
+      const w = -Math.log(gamma - Math.log(1 - W));
+      mu = 0.5440 - 0.39978 * n + 0.025054 * n * n - 0.0006714 * n * n * n;
+      sigma = Math.exp(1.3822 - 0.77857 * n + 0.062767 * n * n - 0.0020322 * n * n * n);
+      const z = (w - mu) / sigma;
+      pValue = 1 - normCdf(z);
+    } else {
+      const w = Math.log(1 - W);
+      mu = -1.5861 - 0.31082 * lnN - 0.083751 * lnN * lnN + 0.0038915 * lnN ** 3;
+      sigma = Math.exp(-0.4803 - 0.082676 * lnN + 0.0030302 * lnN * lnN);
+      const z = (w - mu) / sigma;
+      pValue = 1 - normCdf(z);
+    }
+  } catch (e) {
+    pValue = null;
+  }
+  if (pValue != null) pValue = Math.min(Math.max(pValue, 0), 1);
+  return {
+    stat: W,
+    p: pValue
+  };
+}
+
+// Q-Q plot용 이론적 분위수 계산
+function qqPoints(data) {
+  const n = data.length;
+  const xMean = mean(data);
+  const xStd = stdSample(data);
+  const z = data.map(v => xStd > 0 ? (v - xMean) / xStd : 0);
+  const sortedIdx = z.map((v, i) => i).sort((a, b) => z[a] - z[b]);
+  const sortedZ = sortedIdx.map(i => z[i]);
+  const theoretical = sortedZ.map((_, i) => normInv((i + 1 - 0.5) / n));
+  return theoretical.map((t, i) => ({
+    x: t,
+    y: sortedZ[i]
+  }));
+}
+
+// ---------- Box-Cox 변환 ----------
+function boxcoxTransform(data, lambdaRange = [-3, 3], step = 0.01) {
+  // 양수 데이터만 가능. 최대우도(로그우도) 근사로 최적 lambda 탐색
+  if (data.some(v => v <= 0)) return null;
+  const n = data.length;
+  const logData = data.map(v => Math.log(v));
+  const sumLog = logData.reduce((a, b) => a + b, 0);
+  function transform(y, lambda) {
+    return Math.abs(lambda) < 1e-8 ? Math.log(y) : (Math.pow(y, lambda) - 1) / lambda;
+  }
+  function logLikelihood(lambda) {
+    const yT = data.map(v => transform(v, lambda));
+    const yMean = mean(yT);
+    const ssq = yT.reduce((a, v) => a + (v - yMean) ** 2, 0) / n;
+    if (ssq <= 0) return -Infinity;
+    return -(n / 2) * Math.log(ssq) + (lambda - 1) * sumLog;
+  }
+  let bestLambda = 1,
+    bestLL = -Infinity;
+  for (let l = lambdaRange[0]; l <= lambdaRange[1]; l += step) {
+    const ll = logLikelihood(l);
+    if (ll > bestLL) {
+      bestLL = ll;
+      bestLambda = l;
+    }
+  }
+  const transformed = data.map(v => transform(v, bestLambda));
+  return {
+    lambda: bestLambda,
+    transformed
+  };
+}
+
+// ============================================================
+// 공정능력분석 (Process Capability)
+// data: [{ subgroup: string, value: number }]
+// ============================================================
+function processCapability(rows, LSL, USL) {
+  const groups = {};
+  rows.forEach(r => {
+    if (!groups[r.subgroup]) groups[r.subgroup] = [];
+    groups[r.subgroup].push(r.value);
+  });
+  const groupKeys = Object.keys(groups);
+  const k = groupKeys.length;
+  const allValues = rows.map(r => r.value);
+  const n = allValues.length;
+  const xBar = mean(allValues);
+  const sigmaHat = stdSample(allValues); // 전체 표본표준편차
+  const c4n = unbiasedConst('c4', n);
+  const sigmaOverall = sigmaHat / c4n;
+
+  // 합동표준편차 (군내변동) - 부분군 표준편차의 평균을 RMS로 합동
+  const sigmaSg = groupKeys.map(g => stdSample(groups[g]));
+  const validSigmaSg = sigmaSg.filter(v => !isNaN(v));
+  const sigmaP = Math.sqrt(validSigmaSg.reduce((a, v) => a + v * v, 0) / validSigmaSg.length);
+  const d = n - k + 1;
+  const c4d = unbiasedConst('c4', d);
+  const sigmaWithin = sigmaP / c4d;
+  const Cp = (USL - LSL) / (6 * sigmaWithin);
+  const Cpk = Math.min((USL - xBar) / (3 * sigmaWithin), (xBar - LSL) / (3 * sigmaWithin));
+  const Pp = (USL - LSL) / (6 * sigmaOverall);
+  const Ppk = Math.min((USL - xBar) / (3 * sigmaOverall), (xBar - LSL) / (3 * sigmaOverall));
+
+  // Cpm (목표값 고려, target 미지정시 중심값 사용) - 부가 지수
+  const target = (USL + LSL) / 2;
+  const tau = Math.sqrt(sigmaOverall * sigmaOverall + (xBar - target) ** 2);
+  const Cpm = (USL - LSL) / (6 * tau);
+
+  // ppm 불량률 추정 (정규분포 가정, overall 기준)
+  const zUSL = (USL - xBar) / sigmaOverall;
+  const zLSL = (xBar - LSL) / sigmaOverall;
+  const pAboveUSL = 1 - normCdf(zUSL);
+  const pBelowLSL = 1 - normCdf(zLSL);
+  const ppmTotal = (pAboveUSL + pBelowLSL) * 1e6;
+  return {
+    n,
+    k,
+    xBar,
+    sigmaHat,
+    sigmaOverall,
+    sigmaWithin,
+    sigmaP,
+    Cp,
+    Cpk,
+    Pp,
+    Ppk,
+    Cpm,
+    ppmTotal,
+    pAboveUSL: pAboveUSL * 1e6,
+    pBelowLSL: pBelowLSL * 1e6,
+    groupMeans: groupKeys.map(g => ({
+      subgroup: g,
+      mean: mean(groups[g]),
+      std: stdSample(groups[g]),
+      n: groups[g].length
+    }))
+  };
+}
+function capabilityGrade(cp) {
+  // 강의록 p.9 등급표
+  if (cp == null || isNaN(cp)) return {
+    grade: '-',
+    label: '판정불가',
+    color: '#999'
+  };
+  if (cp >= 1.67) return {
+    grade: '0',
+    label: '매우 충분',
+    color: '#2563eb'
+  };
+  if (cp >= 1.33) return {
+    grade: '1',
+    label: '충분',
+    color: '#16a34a'
+  };
+  if (cp >= 1.00) return {
+    grade: '2',
+    label: '충분하지 않으나 괜찮음',
+    color: '#ca8a04'
+  };
+  if (cp >= 0.67) return {
+    grade: '3',
+    label: '부족',
+    color: '#ea580c'
+  };
+  return {
+    grade: '4',
+    label: '매우 부족',
+    color: '#dc2626'
+  };
+}
+
+// ============================================================
+// 관리도 (Control Charts) - 계량형: Xbar-R, Xbar-S, I-MR
+// ============================================================
+function generateValueChart(rows, chartType = 'Xbar-R', window = 2) {
+  const groups = {};
+  const order = [];
+  rows.forEach(r => {
+    if (!groups[r.subgroup]) {
+      groups[r.subgroup] = [];
+      order.push(r.subgroup);
+    }
+    groups[r.subgroup].push(r.value);
+  });
+  if (chartType === 'Xbar-R' || chartType === 'Xbar-S') {
+    const sg = order.map(g => ({
+      subgroup: g,
+      xbar: mean(groups[g]),
+      r: range(groups[g]),
+      s: stdSample(groups[g]),
+      n: groups[g].length
+    }));
+    const xbarBar = mean(sg.map(s => s.xbar));
+    const counts = sg.map(s => s.n);
+    const modeN = mode(counts);
+    if (chartType === 'Xbar-R') {
+      const rBar = mean(sg.map(s => s.r));
+      const {
+        A2,
+        D3,
+        D4
+      } = ctrlConst(modeN);
+      const xbarChart = sg.map(s => ({
+        subgroup: s.subgroup,
+        point: s.xbar,
+        CL: xbarBar,
+        LCL: xbarBar - A2 * rBar,
+        UCL: xbarBar + A2 * rBar
+      }));
+      const rChart = sg.map(s => ({
+        subgroup: s.subgroup,
+        point: s.r,
+        CL: rBar,
+        LCL: Math.max(0, D3 * rBar),
+        UCL: D4 * rBar
+      }));
+      return {
+        primary: xbarChart,
+        secondary: rChart,
+        primaryLabel: 'X̄',
+        secondaryLabel: 'R',
+        meta: {
+          xbarBar,
+          rBar,
+          n: modeN
+        }
+      };
+    } else {
+      const sBar = mean(sg.map(s => s.s));
+      const {
+        A3,
+        B3,
+        B4
+      } = ctrlConst(modeN);
+      const xbarChart = sg.map(s => ({
+        subgroup: s.subgroup,
+        point: s.xbar,
+        CL: xbarBar,
+        LCL: xbarBar - A3 * sBar,
+        UCL: xbarBar + A3 * sBar
+      }));
+      const sChart = sg.map(s => ({
+        subgroup: s.subgroup,
+        point: s.s,
+        CL: sBar,
+        LCL: Math.max(0, B3 * sBar),
+        UCL: B4 * sBar
+      }));
+      return {
+        primary: xbarChart,
+        secondary: sChart,
+        primaryLabel: 'X̄',
+        secondaryLabel: 's',
+        meta: {
+          xbarBar,
+          sBar,
+          n: modeN
+        }
+      };
+    }
+  }
+  if (chartType === 'I-MR') {
+    const w = window;
+    const values = rows.map(r => r.value);
+    const labels = rows.map(r => r.subgroup);
+    const xbar = mean(values);
+    const mrAll = [];
+    for (let i = 0; i < values.length; i++) {
+      if (i < w - 1) {
+        mrAll.push(NaN);
+        continue;
+      }
+      const slice = values.slice(i - w + 1, i + 1);
+      mrAll.push(range(slice));
+    }
+    const validMr = mrAll.filter(v => !isNaN(v));
+    const mrBar = mean(validMr);
+    const D3 = unbiasedConst('D3', w);
+    const D4 = unbiasedConst('D4', w);
+    const d2 = unbiasedConst('d2', w);
+    const iChart = labels.map((lab, i) => ({
+      subgroup: lab,
+      point: values[i],
+      CL: xbar,
+      LCL: xbar - 3 * mrBar / d2,
+      UCL: xbar + 3 * mrBar / d2
+    }));
+    const mrChart = labels.map((lab, i) => ({
+      subgroup: lab,
+      point: mrAll[i],
+      CL: mrBar,
+      LCL: Math.max(0, D3 * mrBar),
+      UCL: D4 * mrBar
+    }));
+    return {
+      primary: iChart,
+      secondary: mrChart,
+      primaryLabel: 'I',
+      secondaryLabel: 'MR',
+      meta: {
+        xbar,
+        mrBar,
+        window: w
+      }
+    };
+  }
+  return null;
+}
+function mode(arr) {
+  const freq = {};
+  arr.forEach(v => {
+    freq[v] = (freq[v] || 0) + 1;
+  });
+  let best = arr[0],
+    bestCount = 0;
+  Object.keys(freq).forEach(k => {
+    if (freq[k] > bestCount) {
+      bestCount = freq[k];
+      best = Number(k);
+    }
+  });
+  return best;
+}
+
+// ============================================================
+// 관리도 - 계수형: NP, P, C, U
+// rows: [{ subgroup, n (sample_size), count }]
+// ============================================================
+function generateCountChart(rows, chartType = 'NP') {
+  const order = rows.map(r => r.subgroup);
+  const counts = rows.map(r => r.count);
+  const sizes = rows.map(r => r.n);
+  if (chartType === 'NP') {
+    const k = rows.length;
+    const npBar = mean(counts);
+    const pBar = counts.reduce((a, b) => a + b, 0) / sizes.reduce((a, b) => a + b, 0);
+    const chart = order.map((g, i) => ({
+      subgroup: g,
+      point: counts[i],
+      CL: npBar,
+      LCL: Math.max(0, npBar - 3 * Math.sqrt(npBar * (1 - pBar))),
+      UCL: npBar + 3 * Math.sqrt(npBar * (1 - pBar))
+    }));
+    return {
+      primary: chart,
+      primaryLabel: 'NP',
+      meta: {
+        npBar,
+        pBar
+      }
+    };
+  }
+  if (chartType === 'P') {
+    const pBar = counts.reduce((a, b) => a + b, 0) / sizes.reduce((a, b) => a + b, 0);
+    const chart = order.map((g, i) => ({
+      subgroup: g,
+      point: counts[i] / sizes[i],
+      CL: pBar,
+      LCL: Math.max(0, pBar - 3 * Math.sqrt(pBar * (1 - pBar) / sizes[i])),
+      UCL: Math.min(1, pBar + 3 * Math.sqrt(pBar * (1 - pBar) / sizes[i]))
+    }));
+    return {
+      primary: chart,
+      primaryLabel: 'P',
+      meta: {
+        pBar
+      }
+    };
+  }
+  if (chartType === 'C') {
+    const cBar = mean(counts);
+    const chart = order.map((g, i) => ({
+      subgroup: g,
+      point: counts[i],
+      CL: cBar,
+      LCL: Math.max(0, cBar - 3 * Math.sqrt(cBar)),
+      UCL: cBar + 3 * Math.sqrt(cBar)
+    }));
+    return {
+      primary: chart,
+      primaryLabel: 'C',
+      meta: {
+        cBar
+      }
+    };
+  }
+  if (chartType === 'U') {
+    const uBar = counts.reduce((a, b) => a + b, 0) / sizes.reduce((a, b) => a + b, 0);
+    const chart = order.map((g, i) => ({
+      subgroup: g,
+      point: counts[i] / sizes[i],
+      CL: uBar,
+      LCL: Math.max(0, uBar - 3 * Math.sqrt(uBar / sizes[i])),
+      UCL: uBar + 3 * Math.sqrt(uBar / sizes[i])
+    }));
+    return {
+      primary: chart,
+      primaryLabel: 'U',
+      meta: {
+        uBar
+      }
+    };
+  }
+  return null;
+}
+
+// ============================================================
+// Nelson's Rule (8가지 이상판정 규칙) - 강의록 09, p.4
+// chartPoints: [{ point, CL, UCL, LCL }], sigma는 (UCL-CL)/3 로 추정
+// ============================================================
+function nelsonRules(chartPoints) {
+  const n = chartPoints.length;
+  const CL = chartPoints[0]?.CL ?? 0;
+  const sigma = chartPoints[0] ? (chartPoints[0].UCL - chartPoints[0].CL) / 3 : 0;
+  const pts = chartPoints.map(p => p.point);
+  const violations = Array.from({
+    length: n
+  }, () => []);
+  const addV = (i, ruleNo, label) => violations[i].push({
+    rule: ruleNo,
+    label
+  });
+
+  // Rule 1: 1점이 ±3σ를 벗어남
+  for (let i = 0; i < n; i++) {
+    if (pts[i] > CL + 3 * sigma || pts[i] < CL - 3 * sigma) addV(i, 1, 'Rule1: 3σ 이탈');
+  }
+  // Rule 2: 연속 9점이 중심선 한쪽에 존재
+  for (let i = 8; i < n; i++) {
+    const slice = pts.slice(i - 8, i + 1);
+    if (slice.every(v => v > CL) || slice.every(v => v < CL)) {
+      for (let j = i - 8; j <= i; j++) addV(j, 2, 'Rule2: 9점 한쪽편');
+    }
+  }
+  // Rule 3: 연속 6점이 계속 증가 또는 감소
+  for (let i = 5; i < n; i++) {
+    const slice = pts.slice(i - 5, i + 1);
+    let inc = true,
+      dec = true;
+    for (let j = 1; j < slice.length; j++) {
+      if (slice[j] <= slice[j - 1]) inc = false;
+      if (slice[j] >= slice[j - 1]) dec = false;
+    }
+    if (inc || dec) for (let j = i - 5; j <= i; j++) addV(j, 3, 'Rule3: 6점 추세');
+  }
+  // Rule 4: 연속 14점이 번갈아 증감(진동)
+  for (let i = 13; i < n; i++) {
+    const slice = pts.slice(i - 13, i + 1);
+    let alt = true;
+    for (let j = 2; j < slice.length; j++) {
+      const d1 = slice[j] - slice[j - 1];
+      const d2 = slice[j - 1] - slice[j - 2];
+      if (d1 * d2 >= 0) {
+        alt = false;
+        break;
+      }
+    }
+    if (alt) for (let j = i - 13; j <= i; j++) addV(j, 4, 'Rule4: 14점 진동');
+  }
+  // Rule 5: 연속 3점 중 2점이 같은 방향으로 2σ 초과
+  for (let i = 2; i < n; i++) {
+    const slice = pts.slice(i - 2, i + 1);
+    const aboveCount = slice.filter(v => v > CL + 2 * sigma).length;
+    const belowCount = slice.filter(v => v < CL - 2 * sigma).length;
+    if (aboveCount >= 2 || belowCount >= 2) for (let j = i - 2; j <= i; j++) addV(j, 5, 'Rule5: 3점중 2점 2σ초과');
+  }
+  // Rule 6: 연속 5점 중 4점이 같은 방향으로 1σ 초과
+  for (let i = 4; i < n; i++) {
+    const slice = pts.slice(i - 4, i + 1);
+    const aboveCount = slice.filter(v => v > CL + sigma).length;
+    const belowCount = slice.filter(v => v < CL - sigma).length;
+    if (aboveCount >= 4 || belowCount >= 4) for (let j = i - 4; j <= i; j++) addV(j, 6, 'Rule6: 5점중 4점 1σ초과');
+  }
+  // Rule 7: 연속 15점이 모두 ±1σ 이내
+  for (let i = 14; i < n; i++) {
+    const slice = pts.slice(i - 14, i + 1);
+    if (slice.every(v => v < CL + sigma && v > CL - sigma)) {
+      for (let j = i - 14; j <= i; j++) addV(j, 7, 'Rule7: 15점 1σ이내(층화)');
+    }
+  }
+  // Rule 8: 연속 8점이 모두 ±1σ 밖(양쪽 다 존재)
+  for (let i = 7; i < n; i++) {
+    const slice = pts.slice(i - 7, i + 1);
+    const allOutside = slice.every(v => v > CL + sigma || v < CL - sigma);
+    const hasAbove = slice.some(v => v > CL + sigma);
+    const hasBelow = slice.some(v => v < CL - sigma);
+    if (allOutside && hasAbove && hasBelow) for (let j = i - 7; j <= i; j++) addV(j, 8, 'Rule8: 8점 1σ밖 양측');
+  }
+  return violations;
+}
+const NELSON_RULE_DESCRIPTIONS = [{
+  no: 1,
+  text: '1개 이상의 관측치가 ±3σ를 벗어난 경우',
+  kind: '이상치'
+}, {
+  no: 2,
+  text: '연속 9개 이상의 관측치가 평균선 위 혹은 아래에만 존재 (편향)',
+  kind: '편향'
+}, {
+  no: 3,
+  text: '6개 이상의 관측치가 연속적으로 증가 또는 감소 (추세)',
+  kind: '추세'
+}, {
+  no: 4,
+  text: '14개 이상의 관측치가 번갈아 증가/감소 (진동)',
+  kind: '진동'
+}, {
+  no: 5,
+  text: '연속 3개 관측치 중 2개 이상이 ±2σ 이상 (동일방향)',
+  kind: '경고'
+}, {
+  no: 6,
+  text: '연속 5개 관측치 중 4개 이상이 ±1σ 이상 (동일방향)',
+  kind: '경고'
+}, {
+  no: 7,
+  text: '연속 15개 관측치가 ±1σ 범위 안에 존재 (층화)',
+  kind: '층화'
+}, {
+  no: 8,
+  text: '연속 8개 관측치가 모두 ±1σ 범위 밖에 존재 (혼합)',
+  kind: '혼합'
+}];
+
+// ============================================================
+// 데이터 생성기 (강의록 시뮬레이션 함수 포팅)
+// ============================================================
+function randNormal(mean = 0, std = 1) {
+  // Box-Muller
+  let u = 0,
+    v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return mean + std * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+function randUniform(a, b) {
+  return a + Math.random() * (b - a);
+}
+function randBinomial(n, p) {
+  let count = 0;
+  for (let i = 0; i < n; i++) if (Math.random() < p) count++;
+  return count;
+}
+function generateValueData({
+  varName = 'value',
+  target = 0,
+  tolerance = 1,
+  sgName = 'subgroup',
+  numSg = 20,
+  sgSize = 5,
+  sgStd = 1,
+  meanShift = 0.2,
+  sgSizeVariation = 0
+}) {
+  const rows = [];
+  for (let i = 0; i < numSg; i++) {
+    const shift = randUniform(-meanShift, meanShift);
+    const variation = sgSizeVariation > 0 ? Math.floor(randUniform(-sgSizeVariation, sgSizeVariation + 1)) : 0;
+    const n = Math.max(1, sgSize + variation);
+    for (let j = 0; j < n; j++) {
+      rows.push({
+        subgroup: `${sgName}_${i + 1}`,
+        value: randNormal(target + shift, sgStd)
+      });
+    }
+  }
+  return {
+    rows,
+    LSL: target - tolerance,
+    USL: target + tolerance,
+    varName,
+    sgName
+  };
+}
+function generateCountData({
+  sgName = 'lot',
+  numSg = 20,
+  sgSize = 200,
+  p = 0.02,
+  sgSizeVariation = 0
+}) {
+  const rows = [];
+  for (let i = 0; i < numSg; i++) {
+    const variation = sgSizeVariation > 0 ? Math.floor(randUniform(-sgSizeVariation, sgSizeVariation + 1)) : 0;
+    const n = Math.max(1, sgSize + variation);
+    rows.push({
+      subgroup: `${sgName}_${i + 1}`,
+      n,
+      count: randBinomial(n, p)
+    });
+  }
+  return {
+    rows,
+    sgName
+  };
+}
+
+// ---------- 히스토그램 bin 계산 ----------
+function histogramBins(data, nbins = 20) {
+  const minV = Math.min(...data);
+  const maxV = Math.max(...data);
+  const width = (maxV - minV) / nbins || 1;
+  const bins = Array.from({
+    length: nbins
+  }, (_, i) => ({
+    x0: minV + i * width,
+    x1: minV + (i + 1) * width,
+    count: 0
+  }));
+  data.forEach(v => {
+    let idx = Math.floor((v - minV) / width);
+    if (idx >= nbins) idx = nbins - 1;
+    if (idx < 0) idx = 0;
+    bins[idx].count++;
+  });
+  return bins;
+}
+
+// ============================================================
+// [신규] 관리도 자동추천 — 강의록 09-p.3 "Choose Appropriate Control Chart" 도식 로직화
+// ============================================================
+// path: 추천 과정에서 거친 분기 노드 목록(시각화용), result: 최종 추천 차트, reason: 근거 텍스트
+function recommendChart({
+  dataType,
+  subgroupSize,
+  defectKind,
+  sizeConstant
+}) {
+  // dataType: 'value' | 'count'
+  // subgroupSize: 평균 부분군 크기 (계량형일 때만 사용)
+  // defectKind: 'defects'(결점) | 'defectives'(불량) — 계수형일 때만 사용
+  // sizeConstant: true(표본크기 일정) | false(표본크기 가변) — 계수형일 때만 사용
+  const path = [{
+    node: '데이터 타입',
+    value: dataType === 'value' ? 'CONTINUOUS (계량형)' : 'ATTRIBUTE (계수형)'
+  }];
+  if (dataType === 'value') {
+    path.push({
+      node: '부분군 크기',
+      value: subgroupSize <= 1 ? '1 (개별값)' : subgroupSize <= 9 ? `${subgroupSize} (2~9)` : `${subgroupSize} (10 이상)`
+    });
+    let result, reason;
+    if (subgroupSize <= 1) {
+      result = 'I-MR';
+      reason = '부분군 크기가 1(개별 관측치)이므로 이동범위(Moving Range)를 이용하는 I-MR 관리도가 적합합니다.';
+    } else if (subgroupSize <= 9) {
+      result = 'Xbar-R';
+      reason = '부분군 크기가 2~9개 범위이므로 평균-범위(X̄-R) 관리도가 적합합니다. (강의록 적용가이드: 부분군 크기 1~10)';
+    } else {
+      result = 'Xbar-S';
+      reason = '부분군 크기가 10개 이상이므로 평균-표준편차(X̄-S) 관리도가 적합합니다. (강의록 적용가이드: 부분군 크기 10 이상)';
+    }
+    path.push({
+      node: '추천 결과',
+      value: result
+    });
+    return {
+      result,
+      reason,
+      path
+    };
+  } else {
+    path.push({
+      node: '결점 유형',
+      value: defectKind === 'defects' ? 'DEFECTS (결점수)' : 'DEFECTIVES (불량)'
+    });
+    path.push({
+      node: '표본 크기',
+      value: sizeConstant ? 'CONSTANT (일정)' : 'VARIABLE (가변)'
+    });
+    let result, reason;
+    if (defectKind === 'defects') {
+      result = sizeConstant ? 'C' : 'U';
+      reason = sizeConstant ? '결점수(defects) 데이터이고 표본 크기가 동일하므로 C 관리도가 적합합니다.' : '결점수(defects) 데이터이고 표본 크기가 매번 다르므로 단위당 결점수(U) 관리도가 적합합니다.';
+    } else {
+      result = sizeConstant ? 'NP' : 'P';
+      reason = sizeConstant ? '불량(defectives) 데이터이고 표본 크기가 동일하므로 NP 관리도가 적합합니다.' : '불량(defectives) 데이터이고 표본 크기가 매번 다르므로 불량률(P) 관리도가 적합합니다.';
+    }
+    path.push({
+      node: '추천 결과',
+      value: result
+    });
+    return {
+      result,
+      reason,
+      path
+    };
+  }
+}
+
+// ============================================================
+// [신규] 관리상태 × 공정능력 2x2 매트릭스 판정 — 강의록 08-p.3 핵심 개념
+// "공정능력은 규격으로 결정, 관리상태는 관리한계로 결정 → 서로 독립적인 두 축"
+// ============================================================
+function capabilityControlMatrix(isInControl, cpk) {
+  const capable = cpk != null && !isNaN(cpk) && cpk >= 1.33;
+  let quadrant, label, advice, color;
+  if (isInControl && capable) {
+    quadrant = 'Q1';
+    label = '이상적 상태';
+    color = 'good';
+    advice = '관리상태이며 공정능력도 충분합니다. 현재 관리한계와 운영조건을 유지하세요.';
+  } else if (isInControl && !capable) {
+    quadrant = 'Q2';
+    label = '관리는 되지만 능력 부족';
+    color = 'warn';
+    advice = '산포는 안정적(우연원인만 존재)이지만 규격 대비 능력이 부족합니다. 공정의 근본적 산포 축소(설비/공법 개선)가 필요합니다 — 관리한계를 벗어나는 점이 없다고 해서 불량이 안 나는 것은 아닙니다.';
+  } else if (!isInControl && capable) {
+    quadrant = 'Q3';
+    label = '능력은 있으나 불안정';
+    color = 'warn';
+    advice = '현재 산포 기준으로는 능력이 충분해 보이지만 이상원인(비우연원인)이 존재합니다. 이상점을 제거하지 않으면 향후 불량으로 이어질 수 있습니다 — 이상원인 규명이 우선입니다.';
+  } else {
+    quadrant = 'Q4';
+    label = '관리 이탈 + 능력 부족';
+    color = 'bad';
+    advice = '이상원인과 능력부족이 동시에 존재하는 가장 위험한 상태입니다. 즉시 이상원인을 제거하고 관리한계를 재산정한 뒤, 능력 분석을 다시 수행하세요.';
+  }
+  return {
+    quadrant,
+    label,
+    advice,
+    color,
+    isInControl,
+    capable
+  };
+}
+
+// ============================================================
+// [신규] Nelson's Rule 위반 패턴별 이상원인 후보 — 강의록 09 SPC 내용 기반 추론 가이드
+// ============================================================
+const NELSON_CAUSE_HINTS = {
+  1: {
+    kind: '돌발 이상치',
+    causes: ['측정/기록 오류', '설비 일시 오작동', '원재료 로트 불량', '작업자 실수']
+  },
+  2: {
+    kind: '평균의 편향(쉬프트)',
+    causes: ['공구/금형 교체', '원재료 로트 변경', '작업자/교대조 변경', '설비 셋업 변경']
+  },
+  3: {
+    kind: '점진적 추세',
+    causes: ['공구 마모', '촉매/시약 소진', '설비 열화/드리프트', '센서 캘리브레이션 이탈']
+  },
+  4: {
+    kind: '주기적 진동',
+    causes: ['온도/습도의 주기적 변화', '교대조 간 차이 반복', '원재료 공급 주기', '설비의 주기적 보정']
+  },
+  5: {
+    kind: '경고 수준 이상(2σ)',
+    causes: ['공정 변동성 증가 초기 신호', '관리한계 재검토 필요성', '소규모 이상원인 발생 가능성']
+  },
+  6: {
+    kind: '경고 수준 이상(1σ, 누적)',
+    causes: ['공정이 한쪽으로 서서히 치우치는 초기 단계', '설비 워밍업/예열 효과', '주기적 점검 주기와의 연관성']
+  },
+  7: {
+    kind: '층화(stratification)',
+    causes: ['서로 다른 두 공정/설비의 데이터가 섞여 평균화됨', '관리한계 자체가 실제보다 넓게 산정됨', '부분군 구성 방식 재검토 필요']
+  },
+  8: {
+    kind: '혼합(mixture)',
+    causes: ['두 개 이상의 모집단(예: 설비 A/B, 작업자 교대조)이 혼재', '부분군을 잘못 구성하여 이질적 데이터가 합쳐짐']
+  }
+};
+
+// ============================================================
+// 디자인 토큰 — 보고서/현장 품질관리 소프트웨어 톤
+// ============================================================
+const C = {
+  paper: '#f6f5f1',
+  surface: '#ffffff',
+  surfaceAlt: '#eeece5',
+  line: '#dddad1',
+  lineStrong: '#c7c3b7',
+  ink: '#1d1c19',
+  inkSoft: '#5d5b53',
+  inkFaint: '#928f84',
+  accent: '#33406f',
+  accentSoft: '#e6e9f0',
+  good: '#3c6e49',
+  goodSoft: '#e6efe8',
+  warn: '#8a6324',
+  warnSoft: '#f3ead7',
+  bad: '#8c3a35',
+  badSoft: '#f3e2e0'
+};
+const SERIF = "'Noto Serif KR', 'Nanum Myeongjo', serif";
+const SANS = "'Noto Sans KR', -apple-system, sans-serif";
+const NUM = "'Noto Sans KR', -apple-system, sans-serif"; // 숫자도 동일 산세리프, 모노스페이스 사용 안 함
+
+function fmt(n, d = 3) {
+  if (n == null || isNaN(n)) return '—';
+  if (!isFinite(n)) return n > 0 ? '∞' : '−∞';
+  return n.toFixed(d);
+}
+
+// ============================================================
+// 샘플 프리셋
+// ============================================================
+const PRESETS = {
+  pvc: {
+    label: 'PVC 점도',
+    desc: '생산라인 6개 · 공정능력분석',
+    type: 'value',
+    LSL: 3000,
+    USL: 4000,
+    rows: (() => {
+      const data = [[3576.27, 3630.12, 3576.27, 3630.12, 3355.69, 3363.62], [3504.17, 3514.52, 3747.43, 3666.15, 3709.25, 3317.28], [3440.11, 3494.35, 3962.93, 3514.30, 3273.57, 3336.20], [3638.33, 3719.84, 3617.47, 3450.17, 3378.70, 3475.50], [3661.94, 3485.53, 3499.43, 3605.53, 3390.29, 3519.26]];
+      const cols = ['생산라인1', '생산라인2', '생산라인3', '생산라인4', '생산라인5', '생산라인6'];
+      const rows = [];
+      data.forEach(row => row.forEach((v, j) => rows.push({
+        subgroup: cols[j],
+        value: v
+      })));
+      return rows;
+    })(),
+    varName: '점도(viscosity)',
+    sgName: '생산라인'
+  },
+  wafer: {
+    label: '웨이퍼 두께',
+    desc: '반도체 공정 · Xbar-R 관리도',
+    type: 'value',
+    LSL: 38,
+    USL: 42,
+    rows: null,
+    varName: '두께(Thickness, μm)',
+    sgName: 'Lot',
+    genParams: {
+      target: 40,
+      tolerance: 2,
+      sgName: 'Lot',
+      numSg: 30,
+      sgSize: 4,
+      sgStd: 0.9,
+      meanShift: 0.6,
+      sgSizeVariation: 0
+    }
+  },
+  defect: {
+    label: 'LED 불량개수',
+    desc: '품질관리 · NP 관리도',
+    type: 'count',
+    rows: null,
+    varName: '불량개수',
+    sgName: 'Lot',
+    genParams: {
+      sgName: 'Lot',
+      numSg: 30,
+      sgSize: 300,
+      p: 0.02,
+      sgSizeVariation: 0
+    }
+  }
+};
+
+// ============================================================
+// CSV 파서
+// ============================================================
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const headers = lines[0].split(',').map(h => h.trim());
+  const data = lines.slice(1).filter(l => l.trim().length > 0).map(line => {
+    const cells = line.split(',').map(c => c.trim());
+    const obj = {};
+    headers.forEach((h, i) => {
+      obj[h] = cells[i];
+    });
+    return obj;
+  });
+  return {
+    headers,
+    data
+  };
+}
+
+// ============================================================
+// 기본 UI 요소
+// ============================================================
+function Panel({
+  children,
+  style,
+  title,
+  subtitle,
+  eyebrow
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      border: `1px solid ${C.line}`,
+      borderRadius: 3,
+      padding: '20px 22px',
+      ...style
+    }
+  }, (title || eyebrow) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14,
+      paddingBottom: 12,
+      borderBottom: `1px solid ${C.line}`
+    }
+  }, eyebrow && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      letterSpacing: '0.08em',
+      marginBottom: 4
+    }
+  }, eyebrow), title && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: SERIF,
+      fontSize: 16,
+      fontWeight: 600,
+      color: C.ink
+    }
+  }, title), subtitle && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkSoft,
+      marginTop: 3
+    }
+  }, subtitle)), children);
+}
+function Metric({
+  label,
+  value,
+  unit,
+  status,
+  note
+}) {
+  const tone = status === 'good' ? C.good : status === 'warn' ? C.warn : status === 'bad' ? C.bad : C.ink;
+  const toneBg = status === 'good' ? C.goodSoft : status === 'warn' ? C.warnSoft : status === 'bad' ? C.badSoft : C.surfaceAlt;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 150,
+      background: C.surface,
+      border: `1px solid ${C.line}`,
+      borderRadius: 3,
+      padding: '14px 16px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 8,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between'
+    }
+  }, /*#__PURE__*/React.createElement("span", null, label), status && /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: tone,
+      display: 'inline-block'
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 26,
+      fontWeight: 700,
+      color: C.ink,
+      lineHeight: 1.1,
+      fontFamily: NUM
+    }
+  }, value, unit && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: C.inkSoft,
+      marginLeft: 4,
+      fontWeight: 400
+    }
+  }, unit)), note && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: tone,
+      marginTop: 6,
+      background: toneBg,
+      display: 'inline-block',
+      padding: '2px 8px',
+      borderRadius: 2
+    }
+  }, note));
+}
+function Btn({
+  children,
+  onClick,
+  active,
+  variant = 'default',
+  style,
+  small,
+  disabled
+}) {
+  const base = {
+    padding: small ? '6px 12px' : '9px 18px',
+    fontSize: small ? 12 : 13,
+    fontFamily: SANS,
+    fontWeight: 500,
+    borderRadius: 2,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.4 : 1,
+    border: `1px solid ${C.lineStrong}`,
+    background: C.surface,
+    color: C.inkSoft,
+    transition: 'background 0.12s, color 0.12s, border-color 0.12s',
+    whiteSpace: 'nowrap'
+  };
+  if (active) {
+    base.background = C.accent;
+    base.color = '#fff';
+    base.border = `1px solid ${C.accent}`;
+  }
+  if (variant === 'primary' && !active) {
+    base.background = C.accent;
+    base.color = '#fff';
+    base.border = `1px solid ${C.accent}`;
+  }
+  if (variant === 'danger' && !active) {
+    base.color = C.bad;
+    base.border = `1px solid ${C.bad}`;
+  }
+  if (variant === 'ghost') {
+    base.border = '1px solid transparent';
+    base.background = 'transparent';
+  }
+  return /*#__PURE__*/React.createElement("button", {
+    onClick: disabled ? undefined : onClick,
+    disabled: disabled,
+    style: {
+      ...base,
+      ...style
+    }
+  }, children);
+}
+function capStatusOf(cp) {
+  if (cp == null || isNaN(cp)) return 'neutral';
+  if (cp >= 1.33) return 'good';
+  if (cp >= 1.0) return 'warn';
+  return 'bad';
+}
+function Field({
+  label,
+  children
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 110
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 5
+    }
+  }, label), children);
+}
+// ============================================================
+// 차트 컴포넌트 — 인쇄물/보고서 톤 (그레이스케일 베이스 + 단일 액센트)
+// ============================================================
+
+function ControlChartSVG({
+  data,
+  label,
+  width = 760,
+  height = 230,
+  violations = null
+}) {
+  const margin = {
+    top: 16,
+    right: 96,
+    bottom: 28,
+    left: 52
+  };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  if (!data || data.length === 0) return null;
+  const allVals = data.flatMap(d => [d.point, d.UCL, d.LCL, d.CL]).filter(v => !isNaN(v) && v != null);
+  let minV = Math.min(...allVals);
+  let maxV = Math.max(...allVals);
+  const pad = (maxV - minV) * 0.12 || 1;
+  minV -= pad;
+  maxV += pad;
+  const n = data.length;
+  const xScale = i => margin.left + (n <= 1 ? innerW / 2 : i / (n - 1) * innerW);
+  const yScale = v => margin.top + innerH - (v - minV) / (maxV - minV || 1) * innerH;
+  const CL = data[0].CL,
+    UCL = data[0].UCL,
+    LCL = data[0].LCL;
+  const linePath = data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${xScale(i)} ${yScale(d.point)}`).join(' ');
+  const tickVals = Array.from({
+    length: 5
+  }, (_, i) => minV + i / 4 * (maxV - minV));
+  const violatedIdx = new Set();
+  if (violations) violations.forEach((v, i) => {
+    if (v.length > 0) violatedIdx.add(i);
+  });
+  return /*#__PURE__*/React.createElement("svg", {
+    width: "100%",
+    height: height,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      display: 'block',
+      fontFamily: SANS
+    }
+  }, tickVals.map((tv, i) => /*#__PURE__*/React.createElement("g", {
+    key: i
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: yScale(tv),
+    y2: yScale(tv),
+    stroke: C.line,
+    strokeWidth: 1
+  }), /*#__PURE__*/React.createElement("text", {
+    x: margin.left - 8,
+    y: yScale(tv) + 3,
+    fontSize: 10,
+    fill: C.inkFaint,
+    textAnchor: "end"
+  }, tv.toFixed(2)))), /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: yScale(UCL),
+    y2: yScale(UCL),
+    stroke: C.bad,
+    strokeWidth: 1,
+    strokeDasharray: "4,3"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: width - margin.right + 8,
+    y: yScale(UCL) + 3,
+    fontSize: 11,
+    fill: C.bad
+  }, "UCL ", UCL.toFixed(3)), /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: yScale(CL),
+    y2: yScale(CL),
+    stroke: C.inkSoft,
+    strokeWidth: 1.2
+  }), /*#__PURE__*/React.createElement("text", {
+    x: width - margin.right + 8,
+    y: yScale(CL) + 3,
+    fontSize: 11,
+    fill: C.inkSoft
+  }, "CL ", CL.toFixed(3)), /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: yScale(LCL),
+    y2: yScale(LCL),
+    stroke: C.bad,
+    strokeWidth: 1,
+    strokeDasharray: "4,3"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: width - margin.right + 8,
+    y: yScale(LCL) + 3,
+    fontSize: 11,
+    fill: C.bad
+  }, "LCL ", LCL.toFixed(3)), /*#__PURE__*/React.createElement("path", {
+    d: linePath,
+    fill: "none",
+    stroke: C.accent,
+    strokeWidth: 1.5,
+    opacity: 0.9
+  }), data.map((d, i) => {
+    const isViolated = violatedIdx.has(i);
+    return /*#__PURE__*/React.createElement("circle", {
+      key: i,
+      cx: xScale(i),
+      cy: yScale(d.point),
+      r: isViolated ? 5 : 3,
+      fill: isViolated ? C.bad : C.accent,
+      stroke: isViolated ? '#fff' : 'none',
+      strokeWidth: isViolated ? 1.2 : 0
+    }, /*#__PURE__*/React.createElement("title", null, `${d.subgroup}: ${d.point?.toFixed(4)}`));
+  }), data.map((d, i) => {
+    const showEvery = Math.max(1, Math.ceil(n / 12));
+    if (i % showEvery !== 0 && i !== n - 1) return null;
+    return /*#__PURE__*/React.createElement("text", {
+      key: i,
+      x: xScale(i),
+      y: height - margin.bottom + 16,
+      fontSize: 9,
+      fill: C.inkFaint,
+      textAnchor: "middle"
+    }, d.subgroup);
+  }), /*#__PURE__*/React.createElement("text", {
+    x: 14,
+    y: margin.top + innerH / 2,
+    fontSize: 11,
+    fill: C.inkSoft,
+    textAnchor: "middle",
+    transform: `rotate(-90, 14, ${margin.top + innerH / 2})`
+  }, label));
+}
+function HistogramSVG({
+  values,
+  LSL,
+  USL,
+  xBar,
+  sigma,
+  width = 760,
+  height = 280
+}) {
+  const margin = {
+    top: 18,
+    right: 20,
+    bottom: 34,
+    left: 46
+  };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  const nbins = Math.min(24, Math.max(8, Math.round(Math.sqrt(values.length) * 1.5)));
+  const bins = histogramBins(values, nbins);
+  const maxCount = Math.max(...bins.map(b => b.count), 1);
+  const allBounds = [LSL, USL, ...values];
+  const minX = Math.min(...allBounds) - (USL - LSL) * 0.08;
+  const maxX = Math.max(...allBounds) + (USL - LSL) * 0.08;
+  const xScale = v => margin.left + (v - minX) / (maxX - minX) * innerW;
+  const barW = xScale(bins[0].x1) - xScale(bins[0].x0);
+  const curvePoints = [];
+  const steps = 100;
+  const totalArea = values.length * (bins[0].x1 - bins[0].x0);
+  for (let i = 0; i <= steps; i++) {
+    const x = minX + i / steps * (maxX - minX);
+    curvePoints.push([x, normPdf(x, xBar, sigma) * totalArea]);
+  }
+  const maxCurveY = Math.max(...curvePoints.map(p => p[1]));
+  const yMax = Math.max(maxCount, maxCurveY) * 1.15;
+  const yScale = c => margin.top + innerH - c / yMax * innerH;
+  const curvePath = curvePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p[0])} ${yScale(p[1])}`).join(' ');
+  return /*#__PURE__*/React.createElement("svg", {
+    width: "100%",
+    height: height,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      display: 'block',
+      fontFamily: SANS
+    }
+  }, [0, 0.25, 0.5, 0.75, 1].map((f, i) => /*#__PURE__*/React.createElement("line", {
+    key: i,
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: margin.top + innerH * (1 - f),
+    y2: margin.top + innerH * (1 - f),
+    stroke: C.line,
+    strokeWidth: 1
+  })), bins.map((b, i) => /*#__PURE__*/React.createElement("rect", {
+    key: i,
+    x: xScale(b.x0) + 1,
+    y: yScale(b.count),
+    width: Math.max(0, barW - 2),
+    height: innerH + margin.top - yScale(b.count),
+    fill: C.accent,
+    opacity: 0.28,
+    stroke: C.accent,
+    strokeOpacity: 0.5,
+    strokeWidth: 0.5
+  })), /*#__PURE__*/React.createElement("path", {
+    d: curvePath,
+    fill: "none",
+    stroke: C.ink,
+    strokeWidth: 1.4,
+    opacity: 0.75
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: xScale(LSL),
+    x2: xScale(LSL),
+    y1: margin.top,
+    y2: margin.top + innerH,
+    stroke: C.bad,
+    strokeWidth: 1.2,
+    strokeDasharray: "5,3"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: xScale(LSL),
+    y: margin.top - 5,
+    fontSize: 10,
+    fill: C.bad,
+    textAnchor: "middle"
+  }, "LSL"), /*#__PURE__*/React.createElement("line", {
+    x1: xScale(USL),
+    x2: xScale(USL),
+    y1: margin.top,
+    y2: margin.top + innerH,
+    stroke: C.bad,
+    strokeWidth: 1.2,
+    strokeDasharray: "5,3"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: xScale(USL),
+    y: margin.top - 5,
+    fontSize: 10,
+    fill: C.bad,
+    textAnchor: "middle"
+  }, "USL"), /*#__PURE__*/React.createElement("line", {
+    x1: xScale(xBar),
+    x2: xScale(xBar),
+    y1: margin.top,
+    y2: margin.top + innerH,
+    stroke: C.inkSoft,
+    strokeWidth: 1,
+    strokeDasharray: "2,3"
+  }), [minX, (minX + maxX) / 2, maxX].map((v, i) => /*#__PURE__*/React.createElement("text", {
+    key: i,
+    x: xScale(v),
+    y: height - margin.bottom + 18,
+    fontSize: 10,
+    fill: C.inkFaint,
+    textAnchor: "middle"
+  }, v.toFixed(1))));
+}
+function QQPlotSVG({
+  values,
+  width = 340,
+  height = 300
+}) {
+  const margin = {
+    top: 18,
+    right: 18,
+    bottom: 36,
+    left: 42
+  };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  const points = qqPoints(values);
+  const allX = points.map(p => p.x);
+  const allY = points.map(p => p.y);
+  const lo = Math.min(...allX, ...allY) - 0.3;
+  const hi = Math.max(...allX, ...allY) + 0.3;
+  const scale = v => margin.left + (v - lo) / (hi - lo) * innerW;
+  const scaleY = v => margin.top + innerH - (v - lo) / (hi - lo) * innerH;
+  return /*#__PURE__*/React.createElement("svg", {
+    width: "100%",
+    height: height,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      display: 'block',
+      fontFamily: SANS
+    }
+  }, [lo, (lo + hi) / 2, hi].map((v, i) => /*#__PURE__*/React.createElement("g", {
+    key: i
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: scaleY(v),
+    y2: scaleY(v),
+    stroke: C.line,
+    strokeWidth: 1
+  }), /*#__PURE__*/React.createElement("text", {
+    x: margin.left - 6,
+    y: scaleY(v) + 3,
+    fontSize: 9,
+    fill: C.inkFaint,
+    textAnchor: "end"
+  }, v.toFixed(1)), /*#__PURE__*/React.createElement("text", {
+    x: scale(v),
+    y: height - margin.bottom + 16,
+    fontSize: 9,
+    fill: C.inkFaint,
+    textAnchor: "middle"
+  }, v.toFixed(1)))), /*#__PURE__*/React.createElement("line", {
+    x1: scale(lo),
+    y1: scaleY(lo),
+    x2: scale(hi),
+    y2: scaleY(hi),
+    stroke: C.bad,
+    strokeWidth: 1,
+    strokeDasharray: "4,3"
+  }), points.map((p, i) => /*#__PURE__*/React.createElement("circle", {
+    key: i,
+    cx: scale(p.x),
+    cy: scaleY(p.y),
+    r: 2.8,
+    fill: C.accent,
+    opacity: 0.8
+  })), /*#__PURE__*/React.createElement("text", {
+    x: margin.left + innerW / 2,
+    y: height - 6,
+    fontSize: 10,
+    fill: C.inkSoft,
+    textAnchor: "middle"
+  }, "이론 분위수"), /*#__PURE__*/React.createElement("text", {
+    x: 12,
+    y: margin.top + innerH / 2,
+    fontSize: 10,
+    fill: C.inkSoft,
+    textAnchor: "middle",
+    transform: `rotate(-90, 12, ${margin.top + innerH / 2})`
+  }, "표본 분위수"));
+}
+function BoxPlotSVG({
+  groups,
+  width = 760,
+  height = 220,
+  LSL,
+  USL
+}) {
+  const margin = {
+    top: 14,
+    right: 20,
+    bottom: 28,
+    left: 46
+  };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  const stats = groups.map(g => {
+    const sorted = [...g.values].sort((a, b) => a - b);
+    const q = p => {
+      const idx = (sorted.length - 1) * p;
+      const lo = Math.floor(idx),
+        hi = Math.ceil(idx);
+      return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+    };
+    return {
+      name: g.name,
+      min: sorted[0],
+      q1: q(0.25),
+      median: q(0.5),
+      q3: q(0.75),
+      max: sorted[sorted.length - 1]
+    };
+  });
+  const allVals = [LSL, USL, ...groups.flatMap(g => g.values)];
+  const minV = Math.min(...allVals),
+    maxV = Math.max(...allVals);
+  const pad = (maxV - minV) * 0.08 || 1;
+  const yScale = v => margin.top + innerH - (v - (minV - pad)) / (maxV - minV + 2 * pad) * innerH;
+  const bandW = innerW / stats.length;
+  const boxW = Math.min(40, bandW * 0.45);
+  return /*#__PURE__*/React.createElement("svg", {
+    width: "100%",
+    height: height,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      display: 'block',
+      fontFamily: SANS
+    }
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: yScale(LSL),
+    y2: yScale(LSL),
+    stroke: C.bad,
+    strokeWidth: 1,
+    strokeDasharray: "4,3"
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: yScale(USL),
+    y2: yScale(USL),
+    stroke: C.bad,
+    strokeWidth: 1,
+    strokeDasharray: "4,3"
+  }), stats.map((s, i) => {
+    const cx = margin.left + bandW * (i + 0.5);
+    return /*#__PURE__*/React.createElement("g", {
+      key: i
+    }, /*#__PURE__*/React.createElement("line", {
+      x1: cx,
+      x2: cx,
+      y1: yScale(s.min),
+      y2: yScale(s.max),
+      stroke: C.inkSoft,
+      strokeWidth: 1
+    }), /*#__PURE__*/React.createElement("rect", {
+      x: cx - boxW / 2,
+      y: yScale(s.q3),
+      width: boxW,
+      height: Math.max(1, yScale(s.q1) - yScale(s.q3)),
+      fill: C.accent,
+      opacity: 0.22,
+      stroke: C.accent,
+      strokeWidth: 1
+    }), /*#__PURE__*/React.createElement("line", {
+      x1: cx - boxW / 2,
+      x2: cx + boxW / 2,
+      y1: yScale(s.median),
+      y2: yScale(s.median),
+      stroke: C.ink,
+      strokeWidth: 1.6
+    }), /*#__PURE__*/React.createElement("text", {
+      x: cx,
+      y: height - margin.bottom + 16,
+      fontSize: 9,
+      fill: C.inkFaint,
+      textAnchor: "middle"
+    }, s.name));
+  }));
+}
+function MiniBarSVG({
+  values,
+  height = 200,
+  width = 380
+}) {
+  const bins = histogramBins(values, 14);
+  const maxCount = Math.max(...bins.map(b => b.count), 1);
+  const margin = {
+    top: 8,
+    right: 8,
+    bottom: 22,
+    left: 28
+  };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  const barW = innerW / bins.length;
+  return /*#__PURE__*/React.createElement("svg", {
+    width: "100%",
+    height: height,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      fontFamily: SANS
+    }
+  }, bins.map((b, i) => {
+    const h = b.count / maxCount * innerH;
+    return /*#__PURE__*/React.createElement("rect", {
+      key: i,
+      x: margin.left + i * barW + 1,
+      y: margin.top + innerH - h,
+      width: barW - 2,
+      height: h,
+      fill: C.accent,
+      opacity: 0.3,
+      stroke: C.accent,
+      strokeOpacity: 0.5,
+      strokeWidth: 0.5
+    });
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: margin.left,
+    x2: width - margin.right,
+    y1: margin.top + innerH,
+    y2: margin.top + innerH,
+    stroke: C.line
+  }));
+}
+function NelsonRuleBars({
+  violations
+}) {
+  const counts = Array(9).fill(0);
+  violations.forEach(v => v.forEach(rv => {
+    counts[rv.rule]++;
+  }));
+  const max = Math.max(...counts, 1);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 7
+    }
+  }, NELSON_RULE_DESCRIPTIONS.map(rule => /*#__PURE__*/React.createElement("div", {
+    key: rule.no,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 16,
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, rule.no), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      height: 14,
+      background: C.surfaceAlt,
+      borderRadius: 2,
+      overflow: 'hidden',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: '100%',
+      width: `${counts[rule.no] / max * 100}%`,
+      minWidth: counts[rule.no] > 0 ? 4 : 0,
+      background: counts[rule.no] > 0 ? C.bad : C.line
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 20,
+      textAlign: 'right',
+      fontSize: 12,
+      color: counts[rule.no] > 0 ? C.bad : C.inkFaint
+    }
+  }, counts[rule.no]), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1.6,
+      fontSize: 11,
+      color: C.inkSoft
+    }
+  }, rule.text))));
+}
+// ============================================================
+// [신규 1] 관리도 자동추천 — 강의록 09-p.3 플로우차트 인터랙티브 재현
+// ============================================================
+function ChartRecommender({
+  dataType,
+  currentRows,
+  currentCountRows,
+  currentChartType,
+  onApply
+}) {
+  const [subgroupSize, setSubgroupSize] = useState(5);
+  const [defectKind, setDefectKind] = useState('defectives');
+  const [sizeConstant, setSizeConstant] = useState(true);
+
+  // 실제 로드된 데이터에서 평균 부분군 크기를 자동 추정 (계량형)
+  const autoSubgroupSize = useMemo(() => {
+    if (dataType !== 'value' || !currentRows || currentRows.length === 0) return null;
+    const g = {};
+    currentRows.forEach(r => {
+      g[r.subgroup] = (g[r.subgroup] || 0) + 1;
+    });
+    const sizes = Object.values(g);
+    return Math.round(sizes.reduce((a, b) => a + b, 0) / sizes.length);
+  }, [dataType, currentRows]);
+
+  // 계수형: 표본크기 가변여부 자동 추정
+  const autoSizeConstant = useMemo(() => {
+    if (dataType !== 'count' || !currentCountRows || currentCountRows.length === 0) return null;
+    const sizes = currentCountRows.map(r => r.n);
+    const uniq = new Set(sizes);
+    return uniq.size === 1;
+  }, [dataType, currentCountRows]);
+  const effectiveSubgroupSize = autoSubgroupSize ?? subgroupSize;
+  const effectiveSizeConstant = autoSizeConstant ?? sizeConstant;
+  const rec = useMemo(() => {
+    if (dataType === 'value') {
+      return recommendChart({
+        dataType: 'value',
+        subgroupSize: effectiveSubgroupSize
+      });
+    }
+    return recommendChart({
+      dataType: 'count',
+      defectKind,
+      sizeConstant: effectiveSizeConstant
+    });
+  }, [dataType, effectiveSubgroupSize, defectKind, effectiveSizeConstant]);
+  const isCurrentMatch = currentChartType === rec.result;
+  return /*#__PURE__*/React.createElement(Panel, {
+    title: "관리도 자동추천",
+    subtitle: "강의록 흐름도 기반 — 데이터 특성에 맞는 관리도를 자동으로 판단합니다"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 20,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '1 1 280px'
+    }
+  }, dataType === 'value' ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 6
+    }
+  }, "부분군 크기 ", autoSubgroupSize != null && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.accent
+    }
+  }, "(현재 데이터에서 자동 감지: ", autoSubgroupSize, ")")), autoSubgroupSize == null && /*#__PURE__*/React.createElement("input", {
+    type: "range",
+    min: 1,
+    max: 20,
+    value: subgroupSize,
+    onChange: e => setSubgroupSize(parseInt(e.target.value)),
+    style: {
+      width: '100%'
+    }
+  }), autoSubgroupSize == null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkSoft,
+      marginTop: 4
+    }
+  }, subgroupSize, "개 / 부분군")) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 6
+    }
+  }, "결점 유형"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: defectKind === 'defectives',
+    onClick: () => setDefectKind('defectives')
+  }, "불량 (Defectives)"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: defectKind === 'defects',
+    onClick: () => setDefectKind('defects')
+  }, "결점수 (Defects)"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 6
+    }
+  }, "표본 크기 ", autoSizeConstant != null && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.accent
+    }
+  }, "(현재 데이터에서 자동 감지: ", autoSizeConstant ? '일정' : '가변', ")")), autoSizeConstant == null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: sizeConstant,
+    onClick: () => setSizeConstant(true)
+  }, "일정(Constant)"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: !sizeConstant,
+    onClick: () => setSizeConstant(false)
+  }, "가변(Variable)"))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '1.4 1 360px'
+    }
+  }, /*#__PURE__*/React.createElement(RecommendFlowSVG, {
+    path: rec.path
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      padding: '14px 16px',
+      background: isCurrentMatch ? C.goodSoft : C.accentSoft,
+      borderRadius: 2,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 16,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 220
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 3
+    }
+  }, "추천 관리도"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: SERIF,
+      fontSize: 19,
+      fontWeight: 700,
+      color: C.ink
+    }
+  }, rec.result), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkSoft,
+      marginTop: 4,
+      lineHeight: 1.5
+    }
+  }, rec.reason)), isCurrentMatch ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.good,
+      fontWeight: 600
+    }
+  }, "현재 선택된 관리도와 일치합니다") : onApply && /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    small: true,
+    onClick: () => onApply(rec.result)
+  }, "이 관리도로 전환")));
+}
+function RecommendFlowSVG({
+  path
+}) {
+  const width = 420;
+  const rowH = 46;
+  const height = path.length * rowH + 20;
+  return /*#__PURE__*/React.createElement("svg", {
+    width: "100%",
+    height: height,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      display: 'block',
+      fontFamily: SANS
+    }
+  }, path.map((p, i) => {
+    const y = 10 + i * rowH;
+    const isLast = i === path.length - 1;
+    return /*#__PURE__*/React.createElement("g", {
+      key: i
+    }, /*#__PURE__*/React.createElement("rect", {
+      x: 0,
+      y: y,
+      width: width,
+      height: rowH - 10,
+      rx: 2,
+      fill: isLast ? C.accent : C.surfaceAlt,
+      stroke: isLast ? C.accent : C.line,
+      strokeWidth: 1
+    }), /*#__PURE__*/React.createElement("text", {
+      x: 14,
+      y: y + (rowH - 10) / 2 - 6,
+      fontSize: 10,
+      fill: isLast ? '#dfe3ee' : C.inkFaint
+    }, p.node), /*#__PURE__*/React.createElement("text", {
+      x: 14,
+      y: y + (rowH - 10) / 2 + 10,
+      fontSize: 13,
+      fontWeight: isLast ? 700 : 500,
+      fill: isLast ? '#fff' : C.ink
+    }, p.value), !isLast && /*#__PURE__*/React.createElement("line", {
+      x1: width / 2,
+      y1: y + rowH - 10,
+      x2: width / 2,
+      y2: y + rowH,
+      stroke: C.lineStrong,
+      strokeWidth: 1.4,
+      markerEnd: "url(#rec-arrow)"
+    }));
+  }), /*#__PURE__*/React.createElement("defs", null, /*#__PURE__*/React.createElement("marker", {
+    id: "rec-arrow",
+    viewBox: "0 0 10 10",
+    refX: "5",
+    refY: "5",
+    markerWidth: "5",
+    markerHeight: "5",
+    orient: "auto"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M0,0 L10,5 L0,10 Z",
+    fill: C.lineStrong
+  }))));
+}
+
+// ============================================================
+// [신규 2] 관리상태 × 공정능력 2x2 매트릭스
+// ============================================================
+function CapabilityControlMatrixPanel({
+  isInControl,
+  cpk
+}) {
+  const result = capabilityControlMatrix(isInControl, cpk);
+  const cells = [{
+    q: 'Q1',
+    inControl: true,
+    capable: true,
+    label: '관리상태 + 능력충분'
+  }, {
+    q: 'Q2',
+    inControl: true,
+    capable: false,
+    label: '관리상태 + 능력부족'
+  }, {
+    q: 'Q3',
+    inControl: false,
+    capable: true,
+    label: '관리이탈 + 능력충분'
+  }, {
+    q: 'Q4',
+    inControl: false,
+    capable: false,
+    label: '관리이탈 + 능력부족'
+  }];
+  const toneOf = color => color === 'good' ? {
+    bg: C.goodSoft,
+    fg: C.good
+  } : color === 'warn' ? {
+    bg: C.warnSoft,
+    fg: C.warn
+  } : {
+    bg: C.badSoft,
+    fg: C.bad
+  };
+  return /*#__PURE__*/React.createElement(Panel, {
+    title: "관리상태 × 공정능력 매트릭스",
+    subtitle: "공정능력은 규격, 관리상태는 관리한계로 결정 — 서로 독립적인 두 축입니다"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 20,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '0 0 280px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '70px 1fr 1fr',
+      gridTemplateRows: '24px 1fr 1fr',
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", null), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "능력충분 (Cpk≥1.33)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "능력부족"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: 11,
+      color: C.inkFaint,
+      writingMode: 'vertical-rl',
+      textOrientation: 'mixed'
+    }
+  }, "관리상태"), cells.slice(0, 2).map(c => {
+    const active = result.quadrant === c.q;
+    const tone = active ? toneOf(result.color) : {
+      bg: C.surfaceAlt,
+      fg: C.inkFaint
+    };
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.q,
+      style: {
+        background: tone.bg,
+        border: `${active ? 2 : 1}px solid ${active ? tone.fg : C.line}`,
+        borderRadius: 2,
+        padding: '10px 8px',
+        fontSize: 11,
+        color: tone.fg,
+        fontWeight: active ? 700 : 400,
+        minHeight: 64,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center'
+      }
+    }, c.q, " · ", c.label);
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: 11,
+      color: C.inkFaint,
+      writingMode: 'vertical-rl',
+      textOrientation: 'mixed'
+    }
+  }, "관리이탈"), cells.slice(2, 4).map(c => {
+    const active = result.quadrant === c.q;
+    const tone = active ? toneOf(result.color) : {
+      bg: C.surfaceAlt,
+      fg: C.inkFaint
+    };
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.q,
+      style: {
+        background: tone.bg,
+        border: `${active ? 2 : 1}px solid ${active ? tone.fg : C.line}`,
+        borderRadius: 2,
+        padding: '10px 8px',
+        fontSize: 11,
+        color: tone.fg,
+        fontWeight: active ? 700 : 400,
+        minHeight: 64,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center'
+      }
+    }, c.q, " · ", c.label);
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '1 1 280px'
+    }
+  }, (() => {
+    const tone = toneOf(result.color);
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: tone.bg,
+        borderRadius: 2,
+        padding: '14px 16px',
+        height: '100%'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.inkFaint,
+        marginBottom: 4
+      }
+    }, "현재 진단: ", result.quadrant), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontFamily: SERIF,
+        fontSize: 17,
+        fontWeight: 700,
+        color: tone.fg,
+        marginBottom: 8
+      }
+    }, result.label), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: C.inkSoft,
+        lineHeight: 1.6
+      }
+    }, result.advice));
+  })())));
+}
+
+// ============================================================
+// [신규 3] 원인 추정 어시스턴트 — Nelson's Rule 위반 패턴별 이상원인 후보
+// ============================================================
+function CauseAssistant({
+  violations
+}) {
+  const triggeredRules = useMemo(() => {
+    const ruleSet = new Set();
+    violations.forEach(v => v.forEach(rv => ruleSet.add(rv.rule)));
+    return Array.from(ruleSet).sort((a, b) => a - b);
+  }, [violations]);
+  if (triggeredRules.length === 0) {
+    return /*#__PURE__*/React.createElement(Panel, {
+      title: "원인 추정 어시스턴트",
+      subtitle: "Nelson's Rule 위반 패턴 기반 이상원인 후보 제시"
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: C.good,
+        fontWeight: 600
+      }
+    }, "현재 위반된 규칙이 없어 추정할 이상원인이 없습니다. 공정이 안정적인 상태입니다."));
+  }
+  return /*#__PURE__*/React.createElement(Panel, {
+    title: "원인 추정 어시스턴트",
+    subtitle: "감지된 위반 패턴에 따라 의심할 수 있는 이상원인 후보입니다 (실제 원인은 현장 확인 필요)"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10
+    }
+  }, triggeredRules.map(ruleNo => {
+    const ruleDesc = NELSON_RULE_DESCRIPTIONS.find(r => r.no === ruleNo);
+    const hint = NELSON_CAUSE_HINTS[ruleNo];
+    const count = violations.reduce((acc, v) => acc + v.filter(rv => rv.rule === ruleNo).length, 0);
+    return /*#__PURE__*/React.createElement("div", {
+      key: ruleNo,
+      style: {
+        display: 'flex',
+        gap: 12,
+        padding: '12px 14px',
+        background: C.badSoft,
+        borderRadius: 2,
+        border: `1px solid ${C.line}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 26,
+        height: 26,
+        borderRadius: 2,
+        background: C.bad,
+        color: '#fff',
+        fontSize: 11,
+        fontWeight: 700,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0
+      }
+    }, ruleNo), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        fontWeight: 600,
+        color: C.ink,
+        marginBottom: 2
+      }
+    }, hint.kind, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        color: C.inkFaint,
+        fontWeight: 400
+      }
+    }, "· ", count, "개 지점")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.inkFaint,
+        marginBottom: 6
+      }
+    }, ruleDesc?.text), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 6,
+        flexWrap: 'wrap'
+      }
+    }, hint.causes.map((c, i) => /*#__PURE__*/React.createElement("span", {
+      key: i,
+      style: {
+        fontSize: 11,
+        color: C.inkSoft,
+        background: C.surface,
+        border: `1px solid ${C.line}`,
+        borderRadius: 2,
+        padding: '3px 8px'
+      }
+    }, c)))));
+  })));
+}
+
+// ============================================================
+// [신규 4] 공정 흔들어보기 — 실시간 슬라이더 시뮬레이터
+// ============================================================
+function ProcessSimulator({
+  dataType,
+  onApplyValue,
+  onApplyCount
+}) {
+  const [target, setTarget] = useState(40);
+  const [tolerance, setTolerance] = useState(2);
+  const [sgStd, setSgStd] = useState(1);
+  const [meanShift, setMeanShift] = useState(0.3);
+  const [numSg, setNumSg] = useState(25);
+  const [sgSize, setSgSize] = useState(5);
+  const [p, setP] = useState(0.02);
+  const [countNumSg, setCountNumSg] = useState(25);
+  const [countSgSize, setCountSgSize] = useState(200);
+
+  // 데이터는 로컬에서만 생성(미리보기), 디바운스 없이 즉시 재계산 — 가벼운 연산이라 60ms 이내
+  const previewRows = useMemo(() => {
+    if (dataType !== 'value') return null;
+    const gen = generateValueData({
+      target,
+      tolerance,
+      sgName: 'sg',
+      numSg,
+      sgSize,
+      sgStd,
+      meanShift,
+      sgSizeVariation: 0
+    });
+    return gen;
+  }, [dataType, target, tolerance, numSg, sgSize, sgStd, meanShift]);
+  const previewCountRows = useMemo(() => {
+    if (dataType !== 'count') return null;
+    return generateCountData({
+      sgName: 'lot',
+      numSg: countNumSg,
+      sgSize: countSgSize,
+      p,
+      sgSizeVariation: 0
+    });
+  }, [dataType, countNumSg, countSgSize, p]);
+  const previewCapability = useMemo(() => {
+    if (!previewRows) return null;
+    try {
+      return processCapability(previewRows.rows, previewRows.LSL, previewRows.USL);
+    } catch (e) {
+      return null;
+    }
+  }, [previewRows]);
+  const previewChart = useMemo(() => {
+    if (!previewRows) return null;
+    try {
+      return generateValueChart(previewRows.rows, 'Xbar-R');
+    } catch (e) {
+      return null;
+    }
+  }, [previewRows]);
+  const previewCountChart = useMemo(() => {
+    if (!previewCountRows) return null;
+    try {
+      return generateCountChart(previewCountRows.rows, 'NP');
+    } catch (e) {
+      return null;
+    }
+  }, [previewCountRows]);
+  const previewViolations = useMemo(() => {
+    const chart = dataType === 'value' ? previewChart : previewCountChart;
+    if (!chart || !chart.primary) return [];
+    return nelsonRules(chart.primary);
+  }, [previewChart, previewCountChart, dataType]);
+  return /*#__PURE__*/React.createElement(Panel, {
+    title: "공정 흔들어보기",
+    subtitle: "슬라이더를 움직이면 관리도와 공정능력이 실시간으로 바뀝니다 — 직접 적용하면 현재 데이터로 반영됩니다"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1.6fr',
+      gap: 22
+    },
+    className: "f-grid-2"
+  }, /*#__PURE__*/React.createElement("div", null, dataType === 'value' ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SliderField, {
+    label: "목표값",
+    value: target,
+    min: 10,
+    max: 100,
+    step: 1,
+    onChange: setTarget
+  }), /*#__PURE__*/React.createElement(SliderField, {
+    label: "허용오차(±)",
+    value: tolerance,
+    min: 0.5,
+    max: 10,
+    step: 0.1,
+    onChange: setTolerance
+  }), /*#__PURE__*/React.createElement(SliderField, {
+    label: "공정 표준편차 σ",
+    value: sgStd,
+    min: 0.1,
+    max: 5,
+    step: 0.1,
+    onChange: setSgStd
+  }), /*#__PURE__*/React.createElement(SliderField, {
+    label: "평균 이동(불안정성)",
+    value: meanShift,
+    min: 0,
+    max: 5,
+    step: 0.1,
+    onChange: setMeanShift
+  }), /*#__PURE__*/React.createElement(SliderField, {
+    label: "부분군 개수",
+    value: numSg,
+    min: 10,
+    max: 50,
+    step: 1,
+    onChange: setNumSg
+  }), /*#__PURE__*/React.createElement(SliderField, {
+    label: "부분군 크기",
+    value: sgSize,
+    min: 2,
+    max: 15,
+    step: 1,
+    onChange: setSgSize
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    small: true,
+    onClick: () => onApplyValue({
+      target,
+      tolerance,
+      sgName: 'sg',
+      numSg,
+      sgSize,
+      sgStd,
+      meanShift,
+      sgSizeVariation: 0
+    }),
+    style: {
+      marginTop: 10
+    }
+  }, "이 설정으로 데이터 적용")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SliderField, {
+    label: "불량률(p)",
+    value: p,
+    min: 0.001,
+    max: 0.2,
+    step: 0.001,
+    onChange: setP,
+    fmt: v => (v * 100).toFixed(1) + '%'
+  }), /*#__PURE__*/React.createElement(SliderField, {
+    label: "부분군(로트) 개수",
+    value: countNumSg,
+    min: 10,
+    max: 50,
+    step: 1,
+    onChange: setCountNumSg
+  }), /*#__PURE__*/React.createElement(SliderField, {
+    label: "로트당 샘플수",
+    value: countSgSize,
+    min: 50,
+    max: 500,
+    step: 10,
+    onChange: setCountSgSize
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    small: true,
+    onClick: () => onApplyCount({
+      sgName: 'lot',
+      numSg: countNumSg,
+      sgSize: countSgSize,
+      p,
+      sgSizeVariation: 0
+    }),
+    style: {
+      marginTop: 10
+    }
+  }, "이 설정으로 데이터 적용"))), /*#__PURE__*/React.createElement("div", null, dataType === 'value' && previewChart && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Metric, {
+    label: "Cp (미리보기)",
+    value: fmt(previewCapability?.Cp),
+    status: capStatusOf(previewCapability?.Cp)
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "Cpk (미리보기)",
+    value: fmt(previewCapability?.Cpk),
+    status: capStatusOf(previewCapability?.Cpk)
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "이상신호",
+    value: previewViolations.filter(v => v.length > 0).length,
+    status: previewViolations.filter(v => v.length > 0).length === 0 ? 'good' : 'bad'
+  })), /*#__PURE__*/React.createElement(ControlChartSVG, {
+    data: previewChart.primary,
+    label: "X̄",
+    violations: previewViolations,
+    height: 170
+  })), dataType === 'count' && previewCountChart && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Metric, {
+    label: "평균 NP (미리보기)",
+    value: fmt(previewCountChart.meta.npBar, 2)
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "이상신호",
+    value: previewViolations.filter(v => v.length > 0).length,
+    status: previewViolations.filter(v => v.length > 0).length === 0 ? 'good' : 'bad'
+  })), /*#__PURE__*/React.createElement(ControlChartSVG, {
+    data: previewCountChart.primary,
+    label: "NP",
+    violations: previewViolations,
+    height: 170
+  })))));
+}
+function SliderField({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  fmt: fmtFn
+}) {
+  const display = fmtFn ? fmtFn(value) : value;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 5
+    }
+  }, /*#__PURE__*/React.createElement("span", null, label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.accent,
+      fontWeight: 600
+    }
+  }, display)), /*#__PURE__*/React.createElement("input", {
+    type: "range",
+    min: min,
+    max: max,
+    step: step,
+    value: value,
+    onChange: e => onChange(parseFloat(e.target.value)),
+    style: {
+      width: '100%'
+    }
+  }));
+}
+// ============================================================
+// SPCDashboard 메인 컴포넌트
+// ============================================================
+function SPCDashboard() {
+  const [dataType, setDataTypeRaw] = useState('value');
+  const [rows, setRows] = useState(PRESETS.pvc.rows);
+  const [countRows, setCountRows] = useState(() => generateCountData(PRESETS.defect.genParams).rows);
+  const [LSL, setLSL] = useState(PRESETS.pvc.LSL);
+  const [USL, setUSL] = useState(PRESETS.pvc.USL);
+  const [varName, setVarName] = useState(PRESETS.pvc.varName);
+  const [sgName, setSgName] = useState(PRESETS.pvc.sgName);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [valueChartType, setValueChartType] = useState('Xbar-R');
+  const [countChartType, setCountChartType] = useState('NP');
+  const [imrWindow, setImrWindow] = useState(2);
+  const [showDataPanel, setShowDataPanel] = useState(false);
+  const [boxcoxApplied, setBoxcoxApplied] = useState(false);
+  const fileInputRef = useRef(null);
+  const [toast, setToast] = useState(null);
+
+  // ---- 보완 1: 이상치 제거 히스토리를 스택으로 보관 (실제 복구 가능) ----
+  const [removalHistory, setRemovalHistory] = useState([]); // [{ removedRows, removedLots }]
+
+  // ---- 보완 2: CSV 업로드 시 컬럼 매핑 확인 단계 ----
+  const [csvPending, setCsvPending] = useState(null); // { headers, data, guessSg, guessVal, guessN, guessCount }
+
+  const showToast = useCallback((msg, kind = 'info') => {
+    setToast({
+      msg,
+      kind
+    });
+    setTimeout(() => setToast(null), 3200);
+  }, []);
+  const setDataType = useCallback(newType => {
+    setDataTypeRaw(newType);
+    setRemovalHistory([]);
+    if (newType === 'count' && countRows.length === 0) {
+      const gen = generateCountData(PRESETS.defect.genParams);
+      setCountRows(gen.rows);
+    }
+    if (newType === 'count') {
+      setVarName('불량개수');
+      setSgName('Lot');
+    }
+    if (newType === 'value') {
+      setVarName(PRESETS.pvc.varName);
+      setSgName(PRESETS.pvc.sgName);
+    }
+  }, [countRows]);
+  const loadPreset = useCallback(key => {
+    const preset = PRESETS[key];
+    setDataTypeRaw(preset.type);
+    setVarName(preset.varName);
+    setSgName(preset.sgName);
+    setBoxcoxApplied(false);
+    setRemovalHistory([]);
+    if (preset.type === 'value') {
+      let r = preset.rows;
+      if (!r && preset.genParams) {
+        const gen = generateValueData(preset.genParams);
+        r = gen.rows;
+        setLSL(gen.LSL);
+        setUSL(gen.USL);
+      } else {
+        setLSL(preset.LSL);
+        setUSL(preset.USL);
+      }
+      setRows(r);
+    } else {
+      const gen = generateCountData(preset.genParams);
+      setCountRows(gen.rows);
+    }
+    showToast(`"${preset.label}" 데이터를 불러왔습니다.`, 'success');
+  }, [showToast]);
+  const [genParams, setGenParams] = useState({
+    target: 40,
+    tolerance: 2,
+    sgName: 'Lot',
+    numSg: 25,
+    sgSize: 5,
+    sgStd: 1,
+    meanShift: 0.5,
+    sgSizeVariation: 0
+  });
+  const [countGenParams, setCountGenParams] = useState({
+    sgName: 'Lot',
+    numSg: 25,
+    sgSize: 200,
+    p: 0.02,
+    sgSizeVariation: 0
+  });
+  const regenerateValueData = useCallback(() => {
+    const gen = generateValueData({
+      ...genParams,
+      varName
+    });
+    setRows(gen.rows);
+    setLSL(gen.LSL);
+    setUSL(gen.USL);
+    setSgName(genParams.sgName);
+    setBoxcoxApplied(false);
+    setRemovalHistory([]);
+    showToast('새 시뮬레이션 데이터를 생성했습니다.', 'success');
+  }, [genParams, varName, showToast]);
+  const regenerateCountData = useCallback(() => {
+    const gen = generateCountData(countGenParams);
+    setCountRows(gen.rows);
+    setSgName(countGenParams.sgName);
+    setRemovalHistory([]);
+    showToast('새 시뮬레이션 데이터를 생성했습니다.', 'success');
+  }, [countGenParams, showToast]);
+
+  // ---------- CSV 업로드: 1단계 — 파싱 후 매핑 후보를 보여주고 확정 대기 ----------
+  const handleFileUpload = useCallback(e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const {
+          headers,
+          data
+        } = parseCSV(ev.target.result);
+        if (data.length === 0) {
+          showToast('CSV에 데이터 행이 없습니다.', 'error');
+          return;
+        }
+        if (dataType === 'value') {
+          const guessSg = headers.find(k => /sub|group|lot|date|line|grp|구분|로트|라인/i.test(k)) || headers[0];
+          const guessVal = headers.find(k => k !== guessSg && !isNaN(parseFloat(data[0][k]))) || headers[1] || headers[0];
+          setCsvPending({
+            headers,
+            data,
+            guessSg,
+            guessVal
+          });
+        } else {
+          const guessSg = headers.find(k => /sub|group|lot|date|line|grp|구분|로트/i.test(k)) || headers[0];
+          const guessN = headers.find(k => /n$|size|sample|표본/i.test(k)) || headers[1] || headers[0];
+          const guessCount = headers.find(k => /count|defect|fail|불량|결함/i.test(k)) || headers[2] || headers[1] || headers[0];
+          setCsvPending({
+            headers,
+            data,
+            guessSg,
+            guessN,
+            guessCount
+          });
+        }
+      } catch (err) {
+        showToast('CSV 파싱 오류: 형식을 확인해주세요.', 'error');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }, [dataType, showToast]);
+
+  // ---------- CSV 업로드: 2단계 — 사용자가 확인/수정한 매핑으로 실제 반영 ----------
+  const confirmCsvMapping = useCallback(mapping => {
+    const {
+      data
+    } = csvPending;
+    if (dataType === 'value') {
+      const newRows = data.map(d => ({
+        subgroup: d[mapping.sg],
+        value: parseFloat(d[mapping.val])
+      })).filter(r => !isNaN(r.value));
+      if (newRows.length === 0) {
+        showToast('선택한 컬럼에서 숫자 데이터를 찾지 못했습니다.', 'error');
+        return;
+      }
+      setRows(newRows);
+      setVarName(mapping.val);
+      setSgName(mapping.sg);
+    } else {
+      const newRows = data.map(d => ({
+        subgroup: d[mapping.sg],
+        n: parseFloat(d[mapping.n]),
+        count: parseFloat(d[mapping.count])
+      })).filter(r => !isNaN(r.count) && !isNaN(r.n));
+      if (newRows.length === 0) {
+        showToast('선택한 컬럼에서 유효한 데이터를 찾지 못했습니다.', 'error');
+        return;
+      }
+      setCountRows(newRows);
+      setSgName(mapping.sg);
+    }
+    setBoxcoxApplied(false);
+    setRemovalHistory([]);
+    showToast(`CSV 업로드 완료: ${data.length}행 반영됨`, 'success');
+    setCsvPending(null);
+  }, [csvPending, dataType, showToast]);
+
+  // ---------- 직접 편집 ----------
+  const updateRowValue = useCallback((idx, field, val) => {
+    setRows(prev => {
+      const next = [...prev];
+      next[idx] = {
+        ...next[idx],
+        [field]: field === 'value' ? parseFloat(val) : val
+      };
+      return next;
+    });
+    setBoxcoxApplied(false);
+  }, []);
+  const addRow = useCallback(() => {
+    setRows(prev => [...prev, {
+      subgroup: prev.length > 0 ? prev[prev.length - 1].subgroup : 'g1',
+      value: 0
+    }]);
+  }, []);
+  const deleteRow = useCallback(idx => {
+    setRows(prev => prev.filter((_, i) => i !== idx));
+  }, []);
+  const updateCountRowValue = useCallback((idx, field, val) => {
+    setCountRows(prev => {
+      const next = [...prev];
+      next[idx] = {
+        ...next[idx],
+        [field]: field === 'subgroup' ? val : parseFloat(val)
+      };
+      return next;
+    });
+  }, []);
+  const addCountRow = useCallback(() => {
+    setCountRows(prev => [...prev, {
+      subgroup: prev.length > 0 ? `lot_${prev.length + 1}` : 'lot_1',
+      n: 100,
+      count: 1
+    }]);
+  }, []);
+  const deleteCountRow = useCallback(idx => {
+    setCountRows(prev => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  // ---- 보완 1 구현: 이상치 제거(스택에 push) / 마지막 복구(스택에서 pop) ----
+  const removeOutlierLots = useCallback(ooLots => {
+    if (!ooLots || ooLots.length === 0) return;
+    if (dataType === 'value') {
+      setRows(prev => {
+        const removed = prev.filter(r => ooLots.includes(r.subgroup));
+        const kept = prev.filter(r => !ooLots.includes(r.subgroup));
+        setRemovalHistory(h => [...h, {
+          removedRows: removed,
+          removedLots: ooLots,
+          type: 'value'
+        }]);
+        return kept;
+      });
+    } else {
+      setCountRows(prev => {
+        const removed = prev.filter(r => ooLots.includes(r.subgroup));
+        const kept = prev.filter(r => !ooLots.includes(r.subgroup));
+        setRemovalHistory(h => [...h, {
+          removedRows: removed,
+          removedLots: ooLots,
+          type: 'count'
+        }]);
+        return kept;
+      });
+    }
+    showToast(`이상 부분군 ${ooLots.length}개를 제거하고 관리한계를 다시 계산했습니다.`, 'success');
+  }, [dataType, showToast]);
+  const restoreLastRemoval = useCallback(() => {
+    setRemovalHistory(h => {
+      if (h.length === 0) return h;
+      const last = h[h.length - 1];
+      if (last.type === 'value') {
+        setRows(prev => [...prev, ...last.removedRows]);
+      } else {
+        setCountRows(prev => [...prev, ...last.removedRows]);
+      }
+      showToast(`직전 제거(${last.removedLots.length}개 부분군)를 복구했습니다.`, 'success');
+      return h.slice(0, -1);
+    });
+  }, [showToast]);
+
+  // ---------- 분석 파생값 ----------
+  const rawValues = useMemo(() => rows.map(r => r.value).filter(v => !isNaN(v)), [rows]);
+  const normalityResult = useMemo(() => {
+    if (dataType !== 'value' || rawValues.length < 3) return null;
+    return shapiroWilk(rawValues);
+  }, [rawValues, dataType]);
+  const boxcoxResult = useMemo(() => {
+    if (dataType !== 'value' || !boxcoxApplied) return null;
+    if (rawValues.some(v => v <= 0)) return null;
+    return boxcoxTransform(rawValues);
+  }, [rawValues, boxcoxApplied, dataType]);
+  const effectiveRows = useMemo(() => {
+    if (boxcoxResult) return rows.map((r, i) => ({
+      ...r,
+      value: boxcoxResult.transformed[i]
+    }));
+    return rows;
+  }, [rows, boxcoxResult]);
+  const effectiveLSL = useMemo(() => {
+    if (!boxcoxResult) return LSL;
+    const l = boxcoxResult.lambda;
+    return Math.abs(l) < 1e-8 ? Math.log(LSL) : (Math.pow(LSL, l) - 1) / l;
+  }, [LSL, boxcoxResult]);
+  const effectiveUSL = useMemo(() => {
+    if (!boxcoxResult) return USL;
+    const l = boxcoxResult.lambda;
+    return Math.abs(l) < 1e-8 ? Math.log(USL) : (Math.pow(USL, l) - 1) / l;
+  }, [USL, boxcoxResult]);
+  const capability = useMemo(() => {
+    if (dataType !== 'value' || effectiveRows.length < 4) return null;
+    try {
+      return processCapability(effectiveRows, effectiveLSL, effectiveUSL);
+    } catch (e) {
+      return null;
+    }
+  }, [effectiveRows, effectiveLSL, effectiveUSL, dataType]);
+  const valueChart = useMemo(() => {
+    if (dataType !== 'value' || rows.length < 2) return null;
+    try {
+      return generateValueChart(rows, valueChartType, imrWindow);
+    } catch (e) {
+      return null;
+    }
+  }, [rows, valueChartType, imrWindow, dataType]);
+  const countChart = useMemo(() => {
+    if (dataType !== 'count' || countRows.length < 2) return null;
+    try {
+      return generateCountChart(countRows, countChartType);
+    } catch (e) {
+      return null;
+    }
+  }, [countRows, countChartType, dataType]);
+  const primaryViolations = useMemo(() => {
+    const chart = dataType === 'value' ? valueChart : countChart;
+    if (!chart || !chart.primary) return [];
+    return nelsonRules(chart.primary);
+  }, [valueChart, countChart, dataType]);
+  const secondaryViolations = useMemo(() => {
+    if (dataType !== 'value' || !valueChart || !valueChart.secondary) return [];
+    return nelsonRules(valueChart.secondary);
+  }, [valueChart, dataType]);
+  const groupedBySubgroup = useMemo(() => {
+    const g = {};
+    rows.forEach(r => {
+      if (!g[r.subgroup]) g[r.subgroup] = [];
+      g[r.subgroup].push(r.value);
+    });
+    return Object.entries(g).map(([name, values]) => ({
+      name,
+      values
+    }));
+  }, [rows]);
+  const tabs = dataType === 'value' ? [{
+    id: 'overview',
+    label: '대시보드'
+  }, {
+    id: 'capability',
+    label: '공정능력분석'
+  }, {
+    id: 'control',
+    label: '관리도'
+  }, {
+    id: 'simulate',
+    label: '시뮬레이션'
+  }, {
+    id: 'data',
+    label: '데이터'
+  }] : [{
+    id: 'overview',
+    label: '대시보드'
+  }, {
+    id: 'control',
+    label: '관리도'
+  }, {
+    id: 'simulate',
+    label: '시뮬레이션'
+  }, {
+    id: 'data',
+    label: '데이터'
+  }];
+  React.useEffect(() => {
+    if (dataType === 'count' && activeTab === 'capability') setActiveTab('overview');
+  }, [dataType, activeTab]);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: '100vh',
+      background: C.paper,
+      color: C.ink,
+      fontFamily: SANS
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: ${C.paper}; }
+        ::-webkit-scrollbar-thumb { background: ${C.lineStrong}; border-radius: 4px; }
+        button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid ${C.accent}; outline-offset: 1px; }
+        .f-input { background: ${C.surface}; border: 1px solid ${C.lineStrong}; color: ${C.ink}; border-radius: 2px; padding: 7px 10px; font-size: 13px; width: 100%; font-family: ${SANS}; }
+        .f-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .f-table th { text-align: left; padding: 7px 10px; color: ${C.inkSoft}; border-bottom: 1px solid ${C.lineStrong}; font-weight: 500; position: sticky; top: 0; background: ${C.surface}; }
+        .f-table td { padding: 5px 10px; border-bottom: 1px solid ${C.line}; }
+        .f-table tr:hover td { background: ${C.surfaceAlt}; }
+        @media (max-width: 760px) {
+          .f-kpi-row { flex-direction: column; }
+          .f-grid-2 { grid-template-columns: 1fr !important; }
+        }
+      `), /*#__PURE__*/React.createElement(TopBar, {
+    dataType: dataType,
+    setDataType: setDataType,
+    tabs: tabs,
+    activeTab: activeTab,
+    setActiveTab: setActiveTab,
+    showDataPanel: showDataPanel,
+    setShowDataPanel: setShowDataPanel
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxWidth: 1180,
+      margin: '0 auto',
+      padding: '22px 24px 64px'
+    }
+  }, showDataPanel && /*#__PURE__*/React.createElement(DataInputPanel, {
+    dataType: dataType,
+    rows: rows,
+    countRows: countRows,
+    LSL: LSL,
+    setLSL: setLSL,
+    USL: USL,
+    setUSL: setUSL,
+    varName: varName,
+    setVarName: setVarName,
+    sgName: sgName,
+    setSgName: setSgName,
+    loadPreset: loadPreset,
+    genParams: genParams,
+    setGenParams: setGenParams,
+    regenerateValueData: regenerateValueData,
+    countGenParams: countGenParams,
+    setCountGenParams: setCountGenParams,
+    regenerateCountData: regenerateCountData,
+    fileInputRef: fileInputRef,
+    handleFileUpload: handleFileUpload,
+    onClose: () => setShowDataPanel(false)
+  }), csvPending && /*#__PURE__*/React.createElement(CsvMappingModal, {
+    dataType: dataType,
+    pending: csvPending,
+    onCancel: () => setCsvPending(null),
+    onConfirm: confirmCsvMapping
+  }), activeTab === 'overview' && /*#__PURE__*/React.createElement(OverviewTab, {
+    dataType: dataType,
+    capability: capability,
+    valueChart: valueChart,
+    countChart: countChart,
+    primaryViolations: primaryViolations,
+    secondaryViolations: secondaryViolations,
+    varName: varName,
+    sgName: sgName,
+    rows: rows,
+    countRows: countRows,
+    LSL: LSL,
+    USL: USL,
+    normalityResult: normalityResult,
+    valueChartType: valueChartType,
+    countChartType: countChartType
+  }), activeTab === 'capability' && dataType === 'value' && /*#__PURE__*/React.createElement(CapabilityTab, {
+    capability: capability,
+    rawValues: rawValues,
+    LSL: LSL,
+    USL: USL,
+    varName: varName,
+    normalityResult: normalityResult,
+    boxcoxApplied: boxcoxApplied,
+    setBoxcoxApplied: setBoxcoxApplied,
+    boxcoxResult: boxcoxResult,
+    groupedBySubgroup: groupedBySubgroup,
+    effectiveLSL: effectiveLSL,
+    effectiveUSL: effectiveUSL,
+    isInControl: primaryViolations.filter(v => v.length > 0).length === 0
+  }), activeTab === 'control' && /*#__PURE__*/React.createElement(ControlTab, {
+    dataType: dataType,
+    valueChartType: valueChartType,
+    setValueChartType: setValueChartType,
+    countChartType: countChartType,
+    setCountChartType: setCountChartType,
+    valueChart: valueChart,
+    countChart: countChart,
+    primaryViolations: primaryViolations,
+    secondaryViolations: secondaryViolations,
+    varName: varName,
+    imrWindow: imrWindow,
+    setImrWindow: setImrWindow,
+    removeOutlierLots: removeOutlierLots,
+    restoreLastRemoval: restoreLastRemoval,
+    removalHistory: removalHistory,
+    rows: rows,
+    countRows: countRows,
+    setValueChartTypeApply: setValueChartType,
+    setCountChartTypeApply: setCountChartType
+  }), activeTab === 'simulate' && /*#__PURE__*/React.createElement(ProcessSimulator, {
+    dataType: dataType,
+    onApplyValue: params => {
+      const gen = generateValueData(params);
+      setRows(gen.rows);
+      setLSL(gen.LSL);
+      setUSL(gen.USL);
+      setSgName(params.sgName);
+      setBoxcoxApplied(false);
+      setRemovalHistory([]);
+      showToast('시뮬레이션 설정으로 데이터를 적용했습니다.', 'success');
+      setActiveTab('overview');
+    },
+    onApplyCount: params => {
+      const gen = generateCountData(params);
+      setCountRows(gen.rows);
+      setSgName(params.sgName);
+      setRemovalHistory([]);
+      showToast('시뮬레이션 설정으로 데이터를 적용했습니다.', 'success');
+      setActiveTab('overview');
+    }
+  }), activeTab === 'data' && /*#__PURE__*/React.createElement(DataTableTab, {
+    dataType: dataType,
+    rows: rows,
+    countRows: countRows,
+    updateRowValue: updateRowValue,
+    addRow: addRow,
+    deleteRow: deleteRow,
+    updateCountRowValue: updateCountRowValue,
+    addCountRow: addCountRow,
+    deleteCountRow: deleteCountRow,
+    varName: varName,
+    sgName: sgName
+  })), toast && /*#__PURE__*/React.createElement(Toast, {
+    msg: toast.msg,
+    kind: toast.kind
+  }));
+}
+function Toast({
+  msg,
+  kind
+}) {
+  const color = kind === 'success' ? C.good : kind === 'error' ? C.bad : C.accent;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      bottom: 22,
+      right: 22,
+      background: C.surface,
+      border: `1px solid ${color}`,
+      borderRadius: 2,
+      padding: '11px 16px',
+      color: C.ink,
+      fontSize: 13,
+      boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+      zIndex: 1000,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: color
+    }
+  }), msg);
+}
+// ============================================================
+// TopBar
+// ============================================================
+function TopBar({
+  dataType,
+  setDataType,
+  tabs,
+  activeTab,
+  setActiveTab,
+  showDataPanel,
+  setShowDataPanel
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderBottom: `1px solid ${C.line}`,
+      background: C.paper,
+      position: 'sticky',
+      top: 0,
+      zIndex: 50
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxWidth: 1180,
+      margin: '0 auto',
+      padding: '16px 24px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 22,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: SERIF,
+      fontWeight: 700,
+      fontSize: 18,
+      color: C.ink,
+      letterSpacing: '0.01em'
+    }
+  }, "공정 관리 대시보드"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginTop: 1
+    }
+  }, "공정능력분석 · 통계적공정관리(SPC)")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 4,
+      marginLeft: 4
+    }
+  }, tabs.map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    onClick: () => setActiveTab(t.id),
+    style: {
+      padding: '7px 14px',
+      fontSize: 13,
+      border: 'none',
+      background: 'none',
+      cursor: 'pointer',
+      color: activeTab === t.id ? C.ink : C.inkFaint,
+      borderBottom: activeTab === t.id ? `2px solid ${C.accent}` : '2px solid transparent',
+      fontWeight: activeTab === t.id ? 600 : 400
+    }
+  }, t.label))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginLeft: 'auto',
+      display: 'flex',
+      gap: 10,
+      alignItems: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      border: `1px solid ${C.lineStrong}`,
+      borderRadius: 2,
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDataType('value'),
+    style: {
+      padding: '7px 13px',
+      fontSize: 12,
+      fontWeight: 500,
+      border: 'none',
+      cursor: 'pointer',
+      background: dataType === 'value' ? C.accent : C.surface,
+      color: dataType === 'value' ? '#fff' : C.inkSoft
+    }
+  }, "계량형"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDataType('count'),
+    style: {
+      padding: '7px 13px',
+      fontSize: 12,
+      fontWeight: 500,
+      border: 'none',
+      cursor: 'pointer',
+      background: dataType === 'count' ? C.accent : C.surface,
+      color: dataType === 'count' ? '#fff' : C.inkSoft,
+      borderLeft: `1px solid ${C.lineStrong}`
+    }
+  }, "계수형")), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    small: true,
+    onClick: () => setShowDataPanel(!showDataPanel)
+  }, showDataPanel ? '닫기' : '데이터 입력'))));
+}
+
+// ============================================================
+// DataInputPanel
+// ============================================================
+function DataInputPanel({
+  dataType,
+  rows,
+  countRows,
+  LSL,
+  setLSL,
+  USL,
+  setUSL,
+  varName,
+  setVarName,
+  sgName,
+  setSgName,
+  loadPreset,
+  genParams,
+  setGenParams,
+  regenerateValueData,
+  countGenParams,
+  setCountGenParams,
+  regenerateCountData,
+  fileInputRef,
+  handleFileUpload,
+  onClose
+}) {
+  const [mode, setMode] = useState('preset');
+  return /*#__PURE__*/React.createElement(Panel, {
+    style: {
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: SERIF,
+      fontSize: 15,
+      fontWeight: 600,
+      color: C.ink
+    }
+  }, "데이터 입력"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: 'none',
+      border: 'none',
+      color: C.inkFaint,
+      cursor: 'pointer',
+      fontSize: 18,
+      lineHeight: 1
+    }
+  }, "×")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: mode === 'preset',
+    onClick: () => setMode('preset')
+  }, "샘플 프리셋"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: mode === 'generate',
+    onClick: () => setMode('generate')
+  }, "시뮬레이션 생성"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: mode === 'upload',
+    onClick: () => setMode('upload')
+  }, "CSV 업로드")), mode === 'preset' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, Object.entries(PRESETS).map(([key, p]) => /*#__PURE__*/React.createElement("button", {
+    key: key,
+    onClick: () => loadPreset(key),
+    style: {
+      flex: '1 1 220px',
+      textAlign: 'left',
+      background: C.surfaceAlt,
+      border: `1px solid ${C.line}`,
+      borderRadius: 2,
+      padding: '14px 16px',
+      cursor: 'pointer',
+      color: C.ink
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      marginBottom: 4
+    }
+  }, p.label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, p.desc)))), mode === 'generate' && dataType === 'value' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      gap: 12,
+      marginBottom: 14
+    },
+    className: "f-grid-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "목표값(target)"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    value: genParams.target,
+    onChange: e => setGenParams({
+      ...genParams,
+      target: parseFloat(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "허용오차(±tolerance)"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    value: genParams.tolerance,
+    onChange: e => setGenParams({
+      ...genParams,
+      tolerance: parseFloat(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "부분군 이름"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    value: genParams.sgName,
+    onChange: e => setGenParams({
+      ...genParams,
+      sgName: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "부분군 개수"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    value: genParams.numSg,
+    onChange: e => setGenParams({
+      ...genParams,
+      numSg: parseInt(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "부분군 크기(샘플수)"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    value: genParams.sgSize,
+    onChange: e => setGenParams({
+      ...genParams,
+      sgSize: parseInt(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "공정 표준편차(σ)"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    step: "0.1",
+    value: genParams.sgStd,
+    onChange: e => setGenParams({
+      ...genParams,
+      sgStd: parseFloat(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "평균 이동(불안정성)"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    step: "0.1",
+    value: genParams.meanShift,
+    onChange: e => setGenParams({
+      ...genParams,
+      meanShift: parseFloat(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "변수명"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    value: varName,
+    onChange: e => setVarName(e.target.value)
+  }))), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    onClick: regenerateValueData
+  }, "새 데이터 생성"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: 12,
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "매번 다른 랜덤 데이터가 생성됩니다.")), mode === 'generate' && dataType === 'count' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      gap: 12,
+      marginBottom: 14
+    },
+    className: "f-grid-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "부분군 이름"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    value: countGenParams.sgName,
+    onChange: e => setCountGenParams({
+      ...countGenParams,
+      sgName: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "부분군(로트) 개수"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    value: countGenParams.numSg,
+    onChange: e => setCountGenParams({
+      ...countGenParams,
+      numSg: parseInt(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "로트당 샘플수"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    value: countGenParams.sgSize,
+    onChange: e => setCountGenParams({
+      ...countGenParams,
+      sgSize: parseInt(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "불량률/결함률(p)"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    step: "0.005",
+    value: countGenParams.p,
+    onChange: e => setCountGenParams({
+      ...countGenParams,
+      p: parseFloat(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "샘플수 변동폭"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    type: "number",
+    value: countGenParams.sgSizeVariation,
+    onChange: e => setCountGenParams({
+      ...countGenParams,
+      sgSizeVariation: parseInt(e.target.value)
+    })
+  }))), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    onClick: regenerateCountData
+  }, "새 데이터 생성")), mode === 'upload' && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkSoft,
+      marginBottom: 10,
+      lineHeight: 1.6
+    }
+  }, dataType === 'value' ? /*#__PURE__*/React.createElement(React.Fragment, null, "업로드 후 컬럼 매핑을 직접 확인·수정할 수 있습니다. 부분군 컬럼과 측정값 컬럼이 필요합니다.") : /*#__PURE__*/React.createElement(React.Fragment, null, "업로드 후 컬럼 매핑을 직접 확인·수정할 수 있습니다. 부분군, 샘플수, 불량/결함수 컬럼이 필요합니다.")), /*#__PURE__*/React.createElement("input", {
+    ref: fileInputRef,
+    type: "file",
+    accept: ".csv",
+    onChange: handleFileUpload,
+    style: {
+      display: 'none'
+    }
+  }), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    onClick: () => fileInputRef.current?.click()
+  }, "CSV 파일 선택")), dataType === 'value' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 18,
+      paddingTop: 16,
+      borderTop: `1px solid ${C.line}`,
+      display: 'flex',
+      gap: 16,
+      flexWrap: 'wrap',
+      alignItems: 'flex-end'
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "규격하한 LSL"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      width: 130
+    },
+    type: "number",
+    value: LSL,
+    onChange: e => setLSL(parseFloat(e.target.value))
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "규격상한 USL"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      width: 130
+    },
+    type: "number",
+    value: USL,
+    onChange: e => setUSL(parseFloat(e.target.value))
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "측정 변수명"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      width: 160
+    },
+    value: varName,
+    onChange: e => setVarName(e.target.value)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "부분군 컬럼명"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      width: 130
+    },
+    value: sgName,
+    onChange: e => setSgName(e.target.value)
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      paddingBottom: 8
+    }
+  }, "현재 ", rows.length, "개 측정값 로드됨")), dataType === 'count' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 18,
+      paddingTop: 16,
+      borderTop: `1px solid ${C.line}`,
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "현재 ", countRows.length, "개 부분군(로트) 로드됨"));
+}
+
+// ============================================================
+// CsvMappingModal — 보완 기능: CSV 업로드 후 컬럼 매핑을 사용자가 확인/수정
+// ============================================================
+function CsvMappingModal({
+  dataType,
+  pending,
+  onCancel,
+  onConfirm
+}) {
+  const {
+    headers,
+    data
+  } = pending;
+  const [sg, setSg] = useState(pending.guessSg || headers[0]);
+  const [val, setVal] = useState(pending.guessVal || headers[1] || headers[0]);
+  const [n, setN] = useState(pending.guessN || headers[1] || headers[0]);
+  const [count, setCount] = useState(pending.guessCount || headers[2] || headers[0]);
+  const preview = data.slice(0, 5);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'fixed',
+      inset: 0,
+      background: 'rgba(29,28,25,0.45)',
+      zIndex: 200,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      borderRadius: 3,
+      maxWidth: 640,
+      width: '100%',
+      maxHeight: '85vh',
+      overflowY: 'auto',
+      border: `1px solid ${C.line}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '18px 22px',
+      borderBottom: `1px solid ${C.line}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: SERIF,
+      fontSize: 16,
+      fontWeight: 600
+    }
+  }, "CSV 컬럼 매핑 확인"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkSoft,
+      marginTop: 4
+    }
+  }, "자동으로 추측한 컬럼입니다. 실제 분석에 사용할 컬럼이 맞는지 확인하거나 변경하세요.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '18px 22px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 8
+    }
+  }, "업로드된 컬럼 (", headers.length, "개): ", headers.join(', ')), dataType === 'value' ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 14,
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "부분군(subgroup) 컬럼"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "f-input",
+    value: sg,
+    onChange: e => setSg(e.target.value)
+  }, headers.map(h => /*#__PURE__*/React.createElement("option", {
+    key: h,
+    value: h
+  }, h)))), /*#__PURE__*/React.createElement(Field, {
+    label: "측정값 컬럼"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "f-input",
+    value: val,
+    onChange: e => setVal(e.target.value)
+  }, headers.map(h => /*#__PURE__*/React.createElement("option", {
+    key: h,
+    value: h
+  }, h))))) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 14,
+      marginBottom: 16,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "부분군 컬럼"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "f-input",
+    value: sg,
+    onChange: e => setSg(e.target.value)
+  }, headers.map(h => /*#__PURE__*/React.createElement("option", {
+    key: h,
+    value: h
+  }, h)))), /*#__PURE__*/React.createElement(Field, {
+    label: "샘플수(n) 컬럼"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "f-input",
+    value: n,
+    onChange: e => setN(e.target.value)
+  }, headers.map(h => /*#__PURE__*/React.createElement("option", {
+    key: h,
+    value: h
+  }, h)))), /*#__PURE__*/React.createElement(Field, {
+    label: "불량/결함수 컬럼"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "f-input",
+    value: count,
+    onChange: e => setCount(e.target.value)
+  }, headers.map(h => /*#__PURE__*/React.createElement("option", {
+    key: h,
+    value: h
+  }, h))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 8
+    }
+  }, "미리보기 (처음 5행)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      border: `1px solid ${C.line}`,
+      borderRadius: 2,
+      overflowX: 'auto',
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "f-table"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, headers.map(h => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      background: [sg, val, n, count].includes(h) ? C.accentSoft : C.surface,
+      color: [sg, val, n, count].includes(h) ? C.accent : C.inkSoft
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, preview.map((row, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i
+  }, headers.map(h => /*#__PURE__*/React.createElement("td", {
+    key: h
+  }, row[h]))))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'flex-end',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    onClick: onCancel
+  }, "취소"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    onClick: () => onConfirm(dataType === 'value' ? {
+      sg,
+      val
+    } : {
+      sg,
+      n,
+      count
+    })
+  }, "이 매핑으로 데이터 반영")))));
+}
+// ============================================================
+// OverviewTab
+// ============================================================
+function OverviewTab({
+  dataType,
+  capability,
+  valueChart,
+  countChart,
+  primaryViolations,
+  secondaryViolations,
+  varName,
+  sgName,
+  rows,
+  countRows,
+  LSL,
+  USL,
+  normalityResult,
+  valueChartType,
+  countChartType
+}) {
+  const totalViolatedPrimary = primaryViolations.filter(v => v.length > 0).length;
+  const totalViolatedSecondary = secondaryViolations.filter(v => v.length > 0).length;
+  const totalPoints = dataType === 'value' ? valueChart?.primary?.length || 0 : countChart?.primary?.length || 0;
+  const violationRate = totalPoints > 0 ? (totalViolatedPrimary + totalViolatedSecondary) / totalPoints * 100 : 0;
+  const overallStatus = useMemo(() => {
+    if (dataType === 'value' && capability) {
+      if (capability.Cpk >= 1.33 && totalViolatedPrimary === 0) return {
+        label: '안정',
+        color: C.good,
+        bg: C.goodSoft
+      };
+      if (capability.Cpk >= 1.0 && totalViolatedPrimary <= 1) return {
+        label: '주의',
+        color: C.warn,
+        bg: C.warnSoft
+      };
+      return {
+        label: '경고',
+        color: C.bad,
+        bg: C.badSoft
+      };
+    }
+    if (totalViolatedPrimary === 0) return {
+      label: '안정',
+      color: C.good,
+      bg: C.goodSoft
+    };
+    if (totalViolatedPrimary <= 2) return {
+      label: '주의',
+      color: C.warn,
+      bg: C.warnSoft
+    };
+    return {
+      label: '경고',
+      color: C.bad,
+      bg: C.badSoft
+    };
+  }, [dataType, capability, totalViolatedPrimary]);
+  const hasData = dataType === 'value' ? rows.length >= 4 : countRows.length >= 2;
+  if (!hasData) {
+    return /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: 40,
+        textAlign: 'center',
+        color: C.inkFaint
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 14,
+        marginBottom: 6,
+        color: C.inkSoft
+      }
+    }, "분석할 데이터가 없습니다"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12
+      }
+    }, "상단의 \"데이터 입력\"에서 샘플 프리셋을 불러오거나 데이터를 생성해주세요.")));
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 18,
+      padding: '16px 22px',
+      background: overallStatus.bg,
+      border: `1px solid ${C.line}`,
+      borderRadius: 3
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 10,
+      height: 10,
+      borderRadius: '50%',
+      background: overallStatus.color
+    }
+  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkSoft
+    }
+  }, "현재 공정상태 · ", sgName, " 기준 · ", varName), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: SERIF,
+      fontSize: 21,
+      fontWeight: 700,
+      color: overallStatus.color
+    }
+  }, overallStatus.label))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 28,
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'right'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.inkFaint,
+      fontSize: 10
+    }
+  }, "관측 포인트"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 700
+    }
+  }, totalPoints)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'right'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.inkFaint,
+      fontSize: 10
+    }
+  }, "이상신호 비율"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 700,
+      color: violationRate > 5 ? C.bad : C.ink
+    }
+  }, violationRate.toFixed(1), "%")))), dataType === 'value' && capability && /*#__PURE__*/React.createElement("div", {
+    className: "f-kpi-row",
+    style: {
+      display: 'flex',
+      gap: 10,
+      marginBottom: 18,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement(Metric, {
+    label: "Cp · 단기능력",
+    value: fmt(capability.Cp),
+    status: capStatusOf(capability.Cp),
+    note: capabilityGrade(capability.Cp).label
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "Cpk · 단기(편차포함)",
+    value: fmt(capability.Cpk),
+    status: capStatusOf(capability.Cpk),
+    note: capabilityGrade(capability.Cpk).label
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "Pp · 장기능력",
+    value: fmt(capability.Pp),
+    status: capStatusOf(capability.Pp),
+    note: "군간변동 포함"
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "Ppk · 장기(편차포함)",
+    value: fmt(capability.Ppk),
+    status: capStatusOf(capability.Ppk),
+    note: "실제 공정성능"
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "예상 불량률",
+    value: capability.ppmTotal.toFixed(0),
+    unit: "ppm",
+    status: capability.ppmTotal > 6210 ? 'bad' : capability.ppmTotal > 63 ? 'warn' : 'good',
+    note: "정규분포 가정"
+  })), dataType === 'count' && countChart && /*#__PURE__*/React.createElement("div", {
+    className: "f-kpi-row",
+    style: {
+      display: 'flex',
+      gap: 10,
+      marginBottom: 18,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement(Metric, {
+    label: `평균 ${countChart.primaryLabel}`,
+    value: fmt(countChart.meta.npBar ?? countChart.meta.pBar ?? countChart.meta.cBar ?? countChart.meta.uBar, 4),
+    note: "중심선(CL) 기준"
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "이상신호 발생",
+    value: totalViolatedPrimary,
+    status: totalViolatedPrimary === 0 ? 'good' : 'bad',
+    note: `${totalPoints}개 중`
+  }), /*#__PURE__*/React.createElement(Metric, {
+    label: "관리한계 폭",
+    value: fmt(countChart.primary[0].UCL - countChart.primary[0].LCL),
+    note: "UCL−LCL"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "f-grid-2",
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1.3fr 1fr',
+      gap: 14,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Panel, {
+    eyebrow: `관리도 · ${dataType === 'value' ? valueChartType : countChartType}`,
+    title: "공정 추이",
+    subtitle: "이상신호 발생 지점은 적색으로 표시됩니다"
+  }, dataType === 'value' && valueChart && /*#__PURE__*/React.createElement(ControlChartSVG, {
+    data: valueChart.primary,
+    label: valueChart.primaryLabel,
+    violations: primaryViolations,
+    height: 210
+  }), dataType === 'count' && countChart && /*#__PURE__*/React.createElement(ControlChartSVG, {
+    data: countChart.primary,
+    label: countChart.primaryLabel,
+    violations: primaryViolations,
+    height: 210
+  })), /*#__PURE__*/React.createElement(Panel, {
+    title: "공정 분포",
+    subtitle: dataType === 'value' ? '규격(LSL/USL) 대비 분포' : '관측치 분포'
+  }, dataType === 'value' && rows.length > 0 && capability && /*#__PURE__*/React.createElement(HistogramSVG, {
+    values: rows.map(r => r.value),
+    LSL: LSL,
+    USL: USL,
+    xBar: capability.xBar,
+    sigma: capability.sigmaOverall,
+    height: 210,
+    width: 400
+  }), dataType === 'count' && countChart && /*#__PURE__*/React.createElement(MiniBarSVG, {
+    values: countChart.primary.map(d => d.point),
+    height: 210
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "f-grid-2",
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1.3fr 1fr',
+      gap: 14,
+      marginBottom: 14
+    }
+  }, dataType === 'value' && /*#__PURE__*/React.createElement(Panel, {
+    title: "부분군별 분포",
+    subtitle: `${sgName}별 산포 비교`
+  }, /*#__PURE__*/React.createElement(BoxPlotSVG, {
+    groups: groupBy(rows),
+    LSL: LSL,
+    USL: USL,
+    height: 200,
+    width: 500
+  })), dataType === 'value' && normalityResult && /*#__PURE__*/React.createElement(Panel, {
+    title: "정규성 검정",
+    subtitle: "Shapiro-Wilk Test"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 18,
+      alignItems: 'center',
+      height: 160
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "p-value"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 28,
+      fontWeight: 700,
+      color: normalityResult.p >= 0.05 ? C.good : C.bad
+    }
+  }, normalityResult.p != null ? normalityResult.p.toFixed(4) : '—'), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      padding: '4px 10px',
+      borderRadius: 2,
+      display: 'inline-block',
+      background: normalityResult.p >= 0.05 ? C.goodSoft : C.badSoft,
+      color: normalityResult.p >= 0.05 ? C.good : C.bad,
+      fontSize: 11,
+      fontWeight: 600
+    }
+  }, normalityResult.p >= 0.05 ? '정규성 만족' : '정규성 불만족'), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginTop: 10,
+      lineHeight: 1.5
+    }
+  }, normalityResult.p >= 0.05 ? 'Cp/Cpk 계산이 통계적으로 유효합니다.' : '공정능력분석 탭에서 Box-Cox 변환을 적용해보세요.')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 1,
+      height: '100%',
+      background: C.line
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.inkFaint,
+      marginBottom: 4
+    }
+  }, "W 통계량"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      marginBottom: 10
+    }
+  }, normalityResult.stat?.toFixed(4)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: C.inkFaint,
+      marginBottom: 4
+    }
+  }, "판정 기준"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkSoft
+    }
+  }, "p ≥ 0.05 → 정규분포 따름")))), dataType === 'count' && /*#__PURE__*/React.createElement(Panel, {
+    title: "이상신호 요약",
+    subtitle: "규칙별 발생 빈도"
+  }, /*#__PURE__*/React.createElement(NelsonRuleBars, {
+    violations: primaryViolations
+  }))), dataType === 'value' && /*#__PURE__*/React.createElement(Panel, {
+    title: "이상신호 요약",
+    subtitle: "X̄ 관리도 기준 규칙별 발생 빈도"
+  }, /*#__PURE__*/React.createElement(NelsonRuleBars, {
+    violations: primaryViolations
+  })));
+}
+function groupBy(rows) {
+  const g = {};
+  rows.forEach(r => {
+    if (!g[r.subgroup]) g[r.subgroup] = [];
+    g[r.subgroup].push(r.value);
+  });
+  return Object.entries(g).map(([name, values]) => ({
+    name,
+    values
+  }));
+}
+// ============================================================
+// CapabilityTab
+// ============================================================
+function CapabilityTab({
+  capability,
+  rawValues,
+  LSL,
+  USL,
+  varName,
+  normalityResult,
+  boxcoxApplied,
+  setBoxcoxApplied,
+  boxcoxResult,
+  groupedBySubgroup,
+  effectiveLSL,
+  effectiveUSL,
+  isInControl
+}) {
+  if (!capability) {
+    return /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: C.inkFaint,
+        padding: 30,
+        textAlign: 'center',
+        fontSize: 13
+      }
+    }, "분석에 충분한 데이터가 없습니다. (최소 4개 이상의 측정값 필요)"));
+  }
+  const grade = capabilityGrade(capability.Cpk);
+  const canBoxcox = rawValues.every(v => v > 0);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(CapabilityControlMatrixPanel, {
+    isInControl: isInControl,
+    cpk: capability.Cpk
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 14
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '2fr 1fr',
+      gap: 14,
+      marginBottom: 14
+    },
+    className: "f-grid-2"
+  }, /*#__PURE__*/React.createElement(Panel, {
+    title: "공정능력 4대 지수"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement(IndexBlock, {
+    label: "Cp",
+    value: capability.Cp,
+    desc: "단기 · 산포만 고려"
+  }), /*#__PURE__*/React.createElement(IndexBlock, {
+    label: "Cpk",
+    value: capability.Cpk,
+    desc: "단기 · 중심+산포"
+  }), /*#__PURE__*/React.createElement(IndexBlock, {
+    label: "Pp",
+    value: capability.Pp,
+    desc: "장기 · 산포만 고려"
+  }), /*#__PURE__*/React.createElement(IndexBlock, {
+    label: "Ppk",
+    value: capability.Ppk,
+    desc: "장기 · 중심+산포"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      padding: '12px 16px',
+      borderRadius: 2,
+      background: C.surfaceAlt,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 40,
+      height: 40,
+      borderRadius: 2,
+      background: grade.color,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontWeight: 700,
+      fontSize: 16,
+      color: '#fff'
+    }
+  }, grade.grade), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      fontSize: 13
+    }
+  }, grade.label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "Cpk=", fmt(capability.Cpk), " 기준 등급 판정")))), /*#__PURE__*/React.createElement(Panel, {
+    title: "분포 통계"
+  }, /*#__PURE__*/React.createElement(StatRow, {
+    label: "표본수 (n)",
+    value: capability.n
+  }), /*#__PURE__*/React.createElement(StatRow, {
+    label: "부분군수 (k)",
+    value: capability.k
+  }), /*#__PURE__*/React.createElement(StatRow, {
+    label: "전체평균 (x̄)",
+    value: fmt(capability.xBar, 4)
+  }), /*#__PURE__*/React.createElement(StatRow, {
+    label: "σ overall · 장기",
+    value: fmt(capability.sigmaOverall, 4)
+  }), /*#__PURE__*/React.createElement(StatRow, {
+    label: "σ within · 단기",
+    value: fmt(capability.sigmaWithin, 4)
+  }), /*#__PURE__*/React.createElement(StatRow, {
+    label: "Cpm · 목표값 고려",
+    value: fmt(capability.Cpm, 4)
+  }), /*#__PURE__*/React.createElement(StatRow, {
+    label: "예상 불량 (ppm)",
+    value: capability.ppmTotal.toFixed(1),
+    highlight: true
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1.4fr 1fr',
+      gap: 14,
+      marginBottom: 14
+    },
+    className: "f-grid-2"
+  }, /*#__PURE__*/React.createElement(Panel, {
+    title: "공정능력 분포도",
+    subtitle: `${varName} · LSL=${LSL} / USL=${USL}`
+  }, /*#__PURE__*/React.createElement(HistogramSVG, {
+    values: boxcoxResult ? boxcoxResult.transformed : rawValues,
+    LSL: effectiveLSL,
+    USL: effectiveUSL,
+    xBar: capability.xBar,
+    sigma: capability.sigmaOverall,
+    height: 260
+  })), /*#__PURE__*/React.createElement(Panel, {
+    title: "정규성 진단",
+    subtitle: "Q-Q Plot · 직선에 가까울수록 정규분포"
+  }, /*#__PURE__*/React.createElement(QQPlotSVG, {
+    values: boxcoxResult ? boxcoxResult.transformed : rawValues,
+    height: 260
+  }))), /*#__PURE__*/React.createElement(Panel, {
+    title: "정규성 검정과 Box-Cox 변환",
+    subtitle: "Shapiro-Wilk Test 기반 (p≥0.05 → 정규성 만족)"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 24,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 28
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "원본 데이터 p-value"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 22,
+      fontWeight: 700,
+      color: normalityResult?.p >= 0.05 ? C.good : C.bad
+    }
+  }, normalityResult?.p != null ? normalityResult.p.toFixed(4) : '—')), boxcoxResult && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "변환 후 p-value (λ=", boxcoxResult.lambda.toFixed(3), ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 22,
+      fontWeight: 700,
+      color: shapiroWilk(boxcoxResult.transformed).p >= 0.05 ? C.good : C.bad
+    }
+  }, shapiroWilk(boxcoxResult.transformed).p.toFixed(4)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }), !boxcoxApplied ? /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    onClick: () => setBoxcoxApplied(true),
+    disabled: !canBoxcox
+  }, "Box-Cox 변환 적용", !canBoxcox && ' (양수 데이터만 가능)') : /*#__PURE__*/React.createElement(Btn, {
+    onClick: () => setBoxcoxApplied(false)
+  }, "원본 데이터로 복귀")), normalityResult?.p < 0.05 && !boxcoxApplied && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      fontSize: 12,
+      color: C.warn,
+      background: C.warnSoft,
+      padding: '10px 14px',
+      borderRadius: 2
+    }
+  }, "데이터가 정규분포를 따르지 않습니다 (p<0.05). 현재 Cp/Cpk는 참고용이며, Box-Cox 변환 적용을 권장합니다."), boxcoxApplied && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      fontSize: 12,
+      color: C.inkSoft,
+      background: C.surfaceAlt,
+      padding: '10px 14px',
+      borderRadius: 2,
+      lineHeight: 1.6
+    }
+  }, "Box-Cox 변환(λ=", boxcoxResult?.lambda.toFixed(4), ")이 모든 분석(공정능력지수, 분포도, Q-Q plot)에 적용되었습니다. 공정능력지수는 무차원 비율이므로 변환 전후 해석이 동일합니다.")), /*#__PURE__*/React.createElement(Panel, {
+    title: "부분군별 통계",
+    subtitle: "각 부분군의 평균 / 표준편차 / 표본수",
+    style: {
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: 280,
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "f-table"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "부분군"), /*#__PURE__*/React.createElement("th", null, "n"), /*#__PURE__*/React.createElement("th", null, "평균"), /*#__PURE__*/React.createElement("th", null, "표준편차"), /*#__PURE__*/React.createElement("th", null, "중심선과의 거리"))), /*#__PURE__*/React.createElement("tbody", null, capability.groupMeans.map((g, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i
+  }, /*#__PURE__*/React.createElement("td", null, g.subgroup), /*#__PURE__*/React.createElement("td", null, g.n), /*#__PURE__*/React.createElement("td", null, g.mean.toFixed(4)), /*#__PURE__*/React.createElement("td", null, isNaN(g.std) ? '—' : g.std.toFixed(4)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      color: Math.abs(g.mean - capability.xBar) > capability.sigmaWithin * 2 ? C.warn : C.inkSoft
+    }
+  }, (g.mean - capability.xBar).toFixed(4)))))))));
+}
+function IndexBlock({
+  label,
+  value,
+  desc
+}) {
+  const status = capStatusOf(value);
+  const color = status === 'good' ? C.good : status === 'warn' ? C.warn : C.bad;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surfaceAlt,
+      borderRadius: 2,
+      padding: '14px 10px',
+      textAlign: 'center',
+      border: `1px solid ${C.line}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      marginBottom: 6
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 24,
+      fontWeight: 700,
+      color
+    }
+  }, value.toFixed(3)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.inkFaint,
+      marginTop: 4
+    }
+  }, desc));
+}
+function StatRow({
+  label,
+  value,
+  highlight
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      padding: '7px 0',
+      borderBottom: `1px solid ${C.line}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkSoft
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      color: highlight ? C.warn : C.ink
+    }
+  }, value));
+}
+// ============================================================
+// ControlTab — 이상치 제거/복구 워크플로우 보완
+// ============================================================
+function ControlTab({
+  dataType,
+  valueChartType,
+  setValueChartType,
+  countChartType,
+  setCountChartType,
+  valueChart,
+  countChart,
+  primaryViolations,
+  secondaryViolations,
+  varName,
+  imrWindow,
+  setImrWindow,
+  removeOutlierLots,
+  restoreLastRemoval,
+  removalHistory,
+  rows,
+  countRows,
+  setValueChartTypeApply,
+  setCountChartTypeApply
+}) {
+  const ooLots = useMemo(() => {
+    const chart = dataType === 'value' ? valueChart?.primary : countChart?.primary;
+    if (!chart) return [];
+    return chart.filter((d, i) => primaryViolations[i]?.length > 0).map(d => d.subgroup);
+  }, [valueChart, countChart, primaryViolations, dataType]);
+  const hasChart = dataType === 'value' ? !!valueChart : !!countChart;
+  if (!hasChart) {
+    return /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: 40,
+        textAlign: 'center',
+        color: C.inkFaint
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 14,
+        marginBottom: 6,
+        color: C.inkSoft
+      }
+    }, "관리도를 그릴 데이터가 없습니다"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12
+      }
+    }, "상단의 \"데이터 입력\"에서 데이터를 불러오거나 생성해주세요.")));
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(ChartRecommender, {
+    dataType: dataType,
+    currentRows: rows,
+    currentCountRows: countRows,
+    currentChartType: dataType === 'value' ? valueChartType : countChartType,
+    onApply: dataType === 'value' ? setValueChartTypeApply : setCountChartTypeApply
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 14
+    }
+  }), dataType === 'value' && /*#__PURE__*/React.createElement(Panel, {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: C.inkFaint,
+      marginRight: 6
+    }
+  }, "관리도 종류"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: valueChartType === 'Xbar-R',
+    onClick: () => setValueChartType('Xbar-R')
+  }, "X̄-R (부분군 2~10)"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: valueChartType === 'Xbar-S',
+    onClick: () => setValueChartType('Xbar-S')
+  }, "X̄-S (부분군 10+)"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: valueChartType === 'I-MR',
+    onClick: () => setValueChartType('I-MR')
+  }, "I-MR (개별값)"), valueChartType === 'I-MR' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      marginLeft: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: C.inkFaint
+    }
+  }, "윈도우 크기"), /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      width: 56
+    },
+    type: "number",
+    min: 2,
+    max: 10,
+    value: imrWindow,
+    onChange: e => setImrWindow(parseInt(e.target.value) || 2)
+  })))), dataType === 'count' && /*#__PURE__*/React.createElement(Panel, {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: C.inkFaint,
+      marginRight: 6
+    }
+  }, "관리도 종류"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: countChartType === 'NP',
+    onClick: () => setCountChartType('NP')
+  }, "NP (불량개수)"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: countChartType === 'P',
+    onClick: () => setCountChartType('P')
+  }, "P (불량률)"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: countChartType === 'C',
+    onClick: () => setCountChartType('C')
+  }, "C (결점수)"), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    active: countChartType === 'U',
+    onClick: () => setCountChartType('U')
+  }, "U (단위당 결점수)"))), dataType === 'value' && valueChart && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Panel, {
+    title: `${valueChartType} 관리도 · ${valueChart.primaryLabel}`,
+    subtitle: varName,
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(ControlChartSVG, {
+    data: valueChart.primary,
+    label: valueChart.primaryLabel,
+    violations: primaryViolations,
+    height: 250
+  })), /*#__PURE__*/React.createElement(Panel, {
+    title: `${valueChartType} 관리도 · ${valueChart.secondaryLabel}`,
+    subtitle: "산포 관리",
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(ControlChartSVG, {
+    data: valueChart.secondary,
+    label: valueChart.secondaryLabel,
+    violations: secondaryViolations,
+    height: 220
+  }))), dataType === 'count' && countChart && /*#__PURE__*/React.createElement(Panel, {
+    title: `${countChartType} 관리도`,
+    subtitle: "계수형 관리도",
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(ControlChartSVG, {
+    data: countChart.primary,
+    label: countChart.primaryLabel,
+    violations: primaryViolations,
+    height: 260
+  })), /*#__PURE__*/React.createElement(Panel, {
+    title: "관리도 재작성",
+    subtitle: "이상점 확인 → 원인분석 후 제거 → 관리한계 재계산 → 반복",
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 16,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 240
+    }
+  }, ooLots.length > 0 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: C.bad,
+      fontWeight: 600,
+      marginBottom: 6
+    }
+  }, "이상점 ", ooLots.length, "개 발견 — ", ooLots.slice(0, 8).join(', '), ooLots.length > 8 ? ` 외 ${ooLots.length - 8}개` : ''), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkFaint
+    }
+  }, "이상원인을 분석한 뒤, 해당 부분군 데이터를 제거하고 관리한계를 다시 계산할 수 있습니다.")) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: C.good,
+      fontWeight: 600
+    }
+  }, "모든 점이 관리상태입니다. 현재 관리한계를 채택하세요.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8
+    }
+  }, removalHistory.length > 0 && /*#__PURE__*/React.createElement(Btn, {
+    onClick: restoreLastRemoval
+  }, "직전 제거 복구 (", removalHistory[removalHistory.length - 1].removedLots.length, "개)"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    onClick: () => removeOutlierLots(ooLots),
+    disabled: ooLots.length === 0
+  }, "이상 부분군 제거"))), removalHistory.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      paddingTop: 14,
+      borderTop: `1px solid ${C.line}`,
+      fontSize: 12,
+      color: C.inkSoft
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 6
+    }
+  }, "제거 이력 (", removalHistory.length, "단계) — 가장 최근 것부터 순서대로 복구할 수 있습니다."), removalHistory.slice().reverse().map((h, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      fontSize: 11,
+      color: C.inkFaint,
+      padding: '3px 0'
+    }
+  }, removalHistory.length - i, "단계: ", h.removedLots.join(', '), " (", h.removedLots.length, "개 부분군, ", h.removedRows.length, "개 데이터)")))), /*#__PURE__*/React.createElement(CauseAssistant, {
+    violations: primaryViolations
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 14
+    }
+  }), /*#__PURE__*/React.createElement(Panel, {
+    title: "이상신호 판정 기준",
+    subtitle: "강의록 기준 이상판정 규칙 전체"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(2, 1fr)',
+      gap: 8
+    },
+    className: "f-grid-2"
+  }, NELSON_RULE_DESCRIPTIONS.map(rule => {
+    const count = primaryViolations.reduce((acc, v) => acc + v.filter(rv => rv.rule === rule.no).length, 0);
+    return /*#__PURE__*/React.createElement("div", {
+      key: rule.no,
+      style: {
+        display: 'flex',
+        gap: 10,
+        alignItems: 'flex-start',
+        padding: '10px 12px',
+        background: C.surfaceAlt,
+        borderRadius: 2,
+        border: `1px solid ${count > 0 ? C.bad : C.line}`
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 22,
+        height: 22,
+        borderRadius: 2,
+        background: count > 0 ? C.bad : C.line,
+        color: count > 0 ? '#fff' : C.inkFaint,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 11,
+        fontWeight: 700,
+        flexShrink: 0
+      }
+    }, rule.no), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: C.inkSoft,
+        lineHeight: 1.5
+      }
+    }, rule.text));
+  }))));
+}
+// ============================================================
+// DataTableTab
+// ============================================================
+function DataTableTab({
+  dataType,
+  rows,
+  countRows,
+  updateRowValue,
+  addRow,
+  deleteRow,
+  updateCountRowValue,
+  addCountRow,
+  deleteCountRow,
+  varName,
+  sgName
+}) {
+  return /*#__PURE__*/React.createElement(Panel, {
+    title: "데이터 직접 편집",
+    subtitle: "값을 수정하면 모든 분석과 대시보드가 즉시 재계산됩니다"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 12,
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.inkFaint
+    }
+  }, dataType === 'value' ? `${rows.length}개 행 (부분군: ${sgName} / 측정값: ${varName})` : `${countRows.length}개 행`), /*#__PURE__*/React.createElement(Btn, {
+    small: true,
+    variant: "primary",
+    onClick: dataType === 'value' ? addRow : addCountRow
+  }, "행 추가")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: 520,
+      overflowY: 'auto',
+      border: `1px solid ${C.line}`,
+      borderRadius: 2
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "f-table"
+  }, /*#__PURE__*/React.createElement("thead", null, dataType === 'value' ? /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 44
+    }
+  }, "#"), /*#__PURE__*/React.createElement("th", null, sgName), /*#__PURE__*/React.createElement("th", null, varName), /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 44
+    }
+  })) : /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 44
+    }
+  }, "#"), /*#__PURE__*/React.createElement("th", null, "부분군"), /*#__PURE__*/React.createElement("th", null, "샘플수(n)"), /*#__PURE__*/React.createElement("th", null, "불량/결함수"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      width: 44
+    }
+  }))), /*#__PURE__*/React.createElement("tbody", null, dataType === 'value' && rows.map((r, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      color: C.inkFaint
+    }
+  }, i + 1), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      background: 'transparent',
+      border: 'none',
+      padding: '2px 4px'
+    },
+    value: r.subgroup,
+    onChange: e => updateRowValue(i, 'subgroup', e.target.value)
+  })), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      background: 'transparent',
+      border: 'none',
+      padding: '2px 4px'
+    },
+    type: "number",
+    value: r.value,
+    onChange: e => updateRowValue(i, 'value', e.target.value)
+  })), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
+    onClick: () => deleteRow(i),
+    style: {
+      background: 'none',
+      border: 'none',
+      color: C.inkFaint,
+      cursor: 'pointer'
+    }
+  }, "×")))), dataType === 'count' && countRows.map((r, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      color: C.inkFaint
+    }
+  }, i + 1), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      background: 'transparent',
+      border: 'none',
+      padding: '2px 4px'
+    },
+    value: r.subgroup,
+    onChange: e => updateCountRowValue(i, 'subgroup', e.target.value)
+  })), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      background: 'transparent',
+      border: 'none',
+      padding: '2px 4px'
+    },
+    type: "number",
+    value: r.n,
+    onChange: e => updateCountRowValue(i, 'n', e.target.value)
+  })), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("input", {
+    className: "f-input",
+    style: {
+      background: 'transparent',
+      border: 'none',
+      padding: '2px 4px'
+    },
+    type: "number",
+    value: r.count,
+    onChange: e => updateCountRowValue(i, 'count', e.target.value)
+  })), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("button", {
+    onClick: () => deleteCountRow(i),
+    style: {
+      background: 'none',
+      border: 'none',
+      color: C.inkFaint,
+      cursor: 'pointer'
+    }
+  }, "×"))))))));
+}
+function App() {
+  return /*#__PURE__*/React.createElement(SPCDashboard, null);
+}
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
