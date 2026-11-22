@@ -940,9 +940,14 @@ function generateCountChart(rows, chartType = 'NP') {
 // ============================================================
 function nelsonRules(chartPoints) {
   const n = chartPoints.length;
-  const CL = chartPoints[0]?.CL ?? 0;
-  const sigma = chartPoints[0] ? (chartPoints[0].UCL - chartPoints[0].CL) / 3 : 0;
-  const pts = chartPoints.map(p => p.point);
+  // 점마다 관리한계가 다를 수 있으므로(P·U 관리도의 가변 표본크기) 각 점을 자기 한계 기준 z값으로 표준화한 뒤 규칙 적용.
+  // 한계가 일정한 관리도에서는 선형변환이라 판정 결과가 이전과 동일함.
+  const pts = chartPoints.map(p => {
+    const s = (p.UCL - p.CL) / 3;
+    return s > 0 ? (p.point - p.CL) / s : 0;
+  });
+  const CL = 0;
+  const sigma = 1;
   const violations = Array.from({
     length: n
   }, () => []);
@@ -3559,13 +3564,17 @@ function TopBar({
     style: {
       display: 'flex',
       gap: 4,
-      marginLeft: 4
+      marginLeft: 4,
+      maxWidth: '100%',
+      overflowX: 'auto'
     }
   }, tabs.map(t => /*#__PURE__*/React.createElement("button", {
     key: t.id,
     onClick: () => setActiveTab(t.id),
     style: {
       padding: '7px 14px',
+      whiteSpace: 'nowrap',
+      flexShrink: 0,
       fontSize: 13,
       border: 'none',
       background: 'none',
