@@ -1319,6 +1319,21 @@ const SERIF = "'Noto Serif KR', 'Nanum Myeongjo', serif";
 const SANS = "'Noto Sans KR', -apple-system, sans-serif";
 const NUM = "'Noto Sans KR', -apple-system, sans-serif"; // 숫자도 동일 산세리프, 모노스페이스 사용 안 함
 
+// 매우 작은 값(Box-Cox 변환 척도 등)이 0.0000으로 뭉개지지 않도록 유효숫자 기준으로 표시
+function fmtSig(n, d = 4) {
+  if (n == null || isNaN(n)) return '—';
+  if (!isFinite(n)) return n > 0 ? '∞' : '−∞';
+  if (n !== 0 && Math.abs(n) < Math.pow(10, -d + 1)) return n.toExponential(3);
+  const intDigits = Math.max(1, Math.floor(Math.log10(Math.abs(n) || 1)) + 1);
+  // 소수부가 의미 있는 경우(예: 0.333333…)는 자릿수를 늘려 차이가 보이게 함
+  return n.toFixed(Math.max(d, Math.min(10, 6 - intDigits)));
+}
+// 축 눈금: 값의 범위(span)에 맞춰 소수 자릿수 결정 (범위가 매우 좁으면 자릿수를 늘림)
+function fmtTick(v, span) {
+  if (v == null || isNaN(v)) return '';
+  const dec = span > 0 ? Math.min(12, Math.max(1, Math.ceil(-Math.log10(span)) + 1)) : 1;
+  return v.toFixed(dec);
+}
 function fmt(n, d = 3) {
   if (n == null || isNaN(n)) return '—';
   if (!isFinite(n)) return n > 0 ? '∞' : '−∞';
@@ -1329,10 +1344,31 @@ function fmt(n, d = 3) {
 // 샘플 프리셋
 // ============================================================
 const PRESETS = {
-  pvc: {
-    label: 'PVC 점도',
-    desc: '생산라인 6개 · 공정능력분석',
+  pvcDaily: {
+    label: 'PVC 점도 (일별)',
+    desc: '일별 25개 부분군 · 시간순 관리도',
     type: 'value',
+    LSL: 3000,
+    USL: 4000,
+    timeOrdered: true,
+    rows: (() => {
+      // 시간 순서(일자)로 묶은 25개 부분군 × 5개 측정. D14에 이상원인(평균 이동)이 포함된 예시 데이터
+      const data = [[3306.33, 3433.07, 3539.13, 3714.31, 3530.52], [3526.04, 3337.01, 3640.12, 3454.84, 3709.46], [3389.19, 3333.61, 3472.28, 3573.05, 3666.07], [3432.96, 3587.91, 3345.75, 3588.45, 3431.56], [3673.85, 3595.71, 3422.19, 3618.8, 3595.96], [3431.26, 3667.9, 3458.91, 3564.45, 3682.86], [3713.63, 3616.95, 3409.37, 3371.34, 3337.79], [3217.18, 3655.2, 3559.73, 3453.25, 3475.17], [3483.86, 3623.93, 3408.26, 3649.49, 3636.11], [3591.33, 3447.16, 3521.91, 3577.41, 3757.45], [3500.18, 3523.05, 3496.16, 3384.17, 3753.93], [3434.27, 3418.48, 3593.98, 3878.54, 3887.2], [3583.27, 3536.87, 3413.93, 3632.9, 3528.6], [3797.57, 3705.78, 3601.77, 3608.91, 3908.67], [3382.43, 3334.64, 3562.4, 3482.32, 3555.54], [3421.41, 3301.47, 3536.6, 3532.01, 3542.86], [3655.86, 3477.24, 3612.76, 3265.79, 3624.93], [3647.85, 3644.28, 3401.05, 3503.43, 3660.33], [3518.33, 3432.36, 3583.34, 3546.28, 3405.0], [3211.63, 3598.8, 3434.88, 3403.71, 3425.08], [3587.7, 3580.57, 3218.69, 3497.89, 3514.9], [3526.9, 3725.09, 3554.01, 3665.12, 3642.41], [3714.47, 3516.58, 3453.76, 3596.44, 3773.31], [3418.55, 3550.32, 3279.76, 3363.72, 3511.49], [3605.08, 3642.76, 3673.75, 3480.62, 3492.02]];
+      const rows = [];
+      data.forEach((day, i) => day.forEach(v => rows.push({
+        subgroup: `D${String(i + 1).padStart(2, '0')}`,
+        value: v
+      })));
+      return rows;
+    })(),
+    varName: '점도(viscosity)',
+    sgName: '일자'
+  },
+  pvc: {
+    label: 'PVC 점도 (생산라인별)',
+    desc: '강의록 예제 · 라인 간 비교용',
+    type: 'value',
+    timeOrdered: false,
     LSL: 3000,
     USL: 4000,
     rows: (() => {
@@ -1836,7 +1872,7 @@ function HistogramSVG({
     fontSize: 10,
     fill: C.inkFaint,
     textAnchor: "middle"
-  }, v.toFixed(1))));
+  }, fmtTick(v, maxX - minX))));
 }
 function QQPlotSVG({
   values,
@@ -2007,7 +2043,7 @@ function BoxPlotSVG({
       y2: yScale(s.median),
       stroke: C.ink,
       strokeWidth: 1.6
-    }), /*#__PURE__*/React.createElement("text", {
+    }), (stats.length <= 12 || i % Math.ceil(stats.length / 12) === 0 || i === stats.length - 1) && /*#__PURE__*/React.createElement("text", {
       x: cx,
       y: height - margin.bottom + 16,
       fontSize: 9,
@@ -2909,12 +2945,13 @@ function SliderField({
 // ============================================================
 function SPCDashboard() {
   const [dataType, setDataTypeRaw] = useState('value');
-  const [rows, setRows] = useState(PRESETS.pvc.rows);
+  const [rows, setRows] = useState(PRESETS.pvcDaily.rows);
+  const [sgTimeOrdered, setSgTimeOrdered] = useState(true);
   const [countRows, setCountRows] = useState(() => generateCountData(PRESETS.defect.genParams).rows);
-  const [LSL, setLSL] = useState(PRESETS.pvc.LSL);
-  const [USL, setUSL] = useState(PRESETS.pvc.USL);
-  const [varName, setVarName] = useState(PRESETS.pvc.varName);
-  const [sgName, setSgName] = useState(PRESETS.pvc.sgName);
+  const [LSL, setLSL] = useState(PRESETS.pvcDaily.LSL);
+  const [USL, setUSL] = useState(PRESETS.pvcDaily.USL);
+  const [varName, setVarName] = useState(PRESETS.pvcDaily.varName);
+  const [sgName, setSgName] = useState(PRESETS.pvcDaily.sgName);
   const [activeTab, setActiveTab] = useState('overview');
   const [valueChartType, setValueChartType] = useState('Xbar-R');
   const [countChartType, setCountChartType] = useState('NP');
@@ -2949,8 +2986,8 @@ function SPCDashboard() {
       setSgName('Lot');
     }
     if (newType === 'value') {
-      setVarName(PRESETS.pvc.varName);
-      setSgName(PRESETS.pvc.sgName);
+      setVarName(PRESETS.pvcDaily.varName);
+      setSgName(PRESETS.pvcDaily.sgName);
     }
   }, [countRows]);
   const loadPreset = useCallback(key => {
@@ -2958,6 +2995,7 @@ function SPCDashboard() {
     setDataTypeRaw(preset.type);
     setVarName(preset.varName);
     setSgName(preset.sgName);
+    setSgTimeOrdered(preset.timeOrdered !== false);
     setBoxcoxApplied(false);
     setRemovalHistory([]);
     if (preset.type === 'value') {
@@ -3004,6 +3042,7 @@ function SPCDashboard() {
     setLSL(gen.LSL);
     setUSL(gen.USL);
     setSgName(genParams.sgName);
+    setSgTimeOrdered(true);
     setBoxcoxApplied(false);
     setRemovalHistory([]);
     showToast('새 시뮬레이션 데이터를 생성했습니다.', 'success');
@@ -3090,6 +3129,7 @@ function SPCDashboard() {
       setCountRows(newRows);
       setSgName(mapping.sg);
     }
+    setSgTimeOrdered(true);
     setBoxcoxApplied(false);
     setRemovalHistory([]);
     showToast(`CSV 업로드 완료: ${data.length}행 반영됨`, 'success');
@@ -3346,6 +3386,11 @@ function SPCDashboard() {
     pending: csvPending,
     onCancel: () => setCsvPending(null),
     onConfirm: confirmCsvMapping
+  }), (activeTab === 'overview' || activeTab === 'control') && /*#__PURE__*/React.createElement(SubgroupWarning, {
+    k: dataType === 'value' ? valueChart?.primary?.length || 0 : countChart?.primary?.length || 0,
+    timeOrdered: sgTimeOrdered,
+    sgName: sgName,
+    chartLabel: dataType === 'value' && valueChartType === 'I-MR' ? '개별 측정값' : '부분군'
   }), activeTab === 'overview' && /*#__PURE__*/React.createElement(OverviewTab, {
     dataType: dataType,
     capability: capability,
@@ -3404,6 +3449,7 @@ function SPCDashboard() {
       setLSL(gen.LSL);
       setUSL(gen.USL);
       setSgName(params.sgName);
+      setSgTimeOrdered(true);
       setBoxcoxApplied(false);
       setRemovalHistory([]);
       showToast('시뮬레이션 설정으로 데이터를 적용했습니다.', 'success');
@@ -4085,6 +4131,33 @@ function CsvMappingModal({
 // ============================================================
 // OverviewTab
 // ============================================================
+// ============================================================
+// 부분군 구성 경고 — 관리도 전제(시간순 합리적 부분군, 충분한 부분군 수) 점검
+// ============================================================
+function SubgroupWarning({
+  k,
+  timeOrdered,
+  sgName,
+  chartLabel
+}) {
+  const msgs = [];
+  if (!timeOrdered) msgs.push(`현재 부분군(${sgName})은 시간 순서가 아닙니다. 관리도는 시간 순서로 묶은 부분군을 전제로 하므로, 이 데이터의 관리도는 공정 안정성이 아니라 ${sgName} 간 차이를 보여줍니다. 공정능력분석·${sgName}별 비교 용도로만 해석하세요.`);
+  if (k > 0 && k < 20) msgs.push(`${chartLabel} ${k}개로 관리한계를 추정했습니다. 관리한계를 안정적으로 잡으려면 보통 20~25개 이상이 필요하므로 현재 한계선은 참고용입니다.`);
+  if (msgs.length === 0) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14,
+      fontSize: 12,
+      color: C.warn,
+      background: C.warnSoft,
+      padding: '10px 14px',
+      borderRadius: 2,
+      lineHeight: 1.7
+    }
+  }, msgs.map((m, i) => /*#__PURE__*/React.createElement("div", {
+    key: i
+  }, "\u26A0 ", m)));
+}
 function OverviewTab({
   dataType,
   capability,
@@ -4539,8 +4612,12 @@ function CapabilityTab({
       color: C.inkFaint
     }
   }, "Cpk=", fmt(capability.Cpk), " 기준 등급 판정")))), /*#__PURE__*/React.createElement(Panel, {
-    title: "분포 통계"
-  }, /*#__PURE__*/React.createElement(StatRow, {
+    title: "분포 통계",
+    subtitle: boxcoxResult ? `Box-Cox 변환 척도 기준 (λ=${boxcoxResult.lambda.toFixed(2)})` : '원 데이터 척도 기준'
+  }, boxcoxResult && /*#__PURE__*/React.createElement(StatRow, {
+    label: "원 척도 평균 / σ overall",
+    value: `${fmt(mean(rawValues), 2)} / ${fmt(stdSample(rawValues), 2)}`
+  }), /*#__PURE__*/React.createElement(StatRow, {
     label: "표본수 (n)",
     value: capability.n
   }), /*#__PURE__*/React.createElement(StatRow, {
@@ -4548,13 +4625,13 @@ function CapabilityTab({
     value: capability.k
   }), /*#__PURE__*/React.createElement(StatRow, {
     label: "전체평균 (x̄)",
-    value: fmt(capability.xBar, 4)
+    value: fmtSig(capability.xBar)
   }), /*#__PURE__*/React.createElement(StatRow, {
     label: "σ overall · 장기",
-    value: fmt(capability.sigmaOverall, 4)
+    value: fmtSig(capability.sigmaOverall)
   }), /*#__PURE__*/React.createElement(StatRow, {
     label: "σ within · 단기",
-    value: fmt(capability.sigmaWithin, 4)
+    value: fmtSig(capability.sigmaWithin)
   }), /*#__PURE__*/React.createElement(StatRow, {
     label: "Cpm · 목표값 고려",
     value: fmt(capability.Cpm, 4)
@@ -4652,7 +4729,17 @@ function CapabilityTab({
       borderRadius: 2,
       lineHeight: 1.6
     }
-  }, "Box-Cox 변환(λ=", boxcoxResult?.lambda.toFixed(4), ")이 모든 분석(공정능력지수, 분포도, Q-Q plot)에 적용되었습니다. 공정능력지수는 무차원 비율이므로 변환 전후 해석이 동일합니다.")), /*#__PURE__*/React.createElement(Panel, {
+  }, "Box-Cox 변환(λ=", boxcoxResult?.lambda.toFixed(4), ")이 모든 분석(공정능력지수, 분포도, Q-Q plot)에 적용되었습니다. 공정능력지수는 무차원 비율이므로 변환 전후 해석이 동일합니다."), boxcoxApplied && boxcoxResult && Math.abs(boxcoxResult.lambda) >= 2.99 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      fontSize: 12,
+      color: C.bad,
+      background: C.badSoft || C.warnSoft,
+      padding: '10px 14px',
+      borderRadius: 2,
+      lineHeight: 1.6
+    }
+  }, "\u26A0 최적 λ가 탐색 범위 경계(±3)에 걸렸습니다. 변환으로 정규성을 맞추기 어려운 데이터라는 뜻이며, 변환값이 한 점 근처로 압축돼 통계량이 매우 작게 표시됩니다. 변환보다 이상치(측정 오류·이상원인) 여부를 먼저 확인하세요.")), /*#__PURE__*/React.createElement(Panel, {
     title: "부분군별 통계",
     subtitle: "각 부분군의 평균 / 표준편차 / 표본수",
     style: {
@@ -4667,11 +4754,11 @@ function CapabilityTab({
     className: "f-table"
   }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "부분군"), /*#__PURE__*/React.createElement("th", null, "n"), /*#__PURE__*/React.createElement("th", null, "평균"), /*#__PURE__*/React.createElement("th", null, "표준편차"), /*#__PURE__*/React.createElement("th", null, "중심선과의 거리"))), /*#__PURE__*/React.createElement("tbody", null, capability.groupMeans.map((g, i) => /*#__PURE__*/React.createElement("tr", {
     key: i
-  }, /*#__PURE__*/React.createElement("td", null, g.subgroup), /*#__PURE__*/React.createElement("td", null, g.n), /*#__PURE__*/React.createElement("td", null, g.mean.toFixed(4)), /*#__PURE__*/React.createElement("td", null, isNaN(g.std) ? '—' : g.std.toFixed(4)), /*#__PURE__*/React.createElement("td", {
+  }, /*#__PURE__*/React.createElement("td", null, g.subgroup), /*#__PURE__*/React.createElement("td", null, g.n), /*#__PURE__*/React.createElement("td", null, fmtSig(g.mean)), /*#__PURE__*/React.createElement("td", null, isNaN(g.std) ? '—' : fmtSig(g.std)), /*#__PURE__*/React.createElement("td", {
     style: {
       color: Math.abs(g.mean - capability.xBar) > capability.sigmaWithin * 2 ? C.warn : C.inkSoft
     }
-  }, (g.mean - capability.xBar).toFixed(4)))))))));
+  }, fmtSig(g.mean - capability.xBar)))))))));
 }
 function IndexBlock({
   label,
